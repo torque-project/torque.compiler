@@ -1,0 +1,119 @@
+(ns torque.compiler.jit
+  (:require
+    [torque.compiler.emit :as emit]
+    [torque.compiler.util :as util]
+    [torque.ffi :as ffi]
+    [torque.string :as str]))
+
+(def ^:private host  (ffi/so))
+(def ^:private llvm  (ffi/so "LLVM"))
+(def ^:private libdl (ffi/so "dl"))
+
+(ffi/defimport dls libdl dlsym :ptr [:ptr :string])
+
+(ffi/defimport make-jit llvm LLVMOrcCreateInstance :ptr [:ptr])
+(ffi/defimport free-jit llvm LLVMOrcDisposeInstance :void [:ptr])
+
+(ffi/defimport resolve llvm LLVMOrcGetSymbolAddress :ptr [:ptr :string])
+
+(ffi/defimport add-eager-module llvm LLVMOrcAddEagerlyCompiledIR
+  :uint32 [:ptr :ptr :ptr :ptr])
+
+(ffi/defimport add-lazy-module llvm LLVMOrcAddLazilyCompiledIR
+  :uint32 [:ptr :ptr :ptr :ptr])
+
+(ffi/defimport remove-module llvm LLVMOrcRemoveModule :void [:ptr])
+
+(ffi/defimport default-triple llvm LLVMGetDefaultTargetTriple :ptr [])
+
+(ffi/defimport triple-target llvm LLVMGetTargetFromTriple
+  :sint32 [:string ^:out :ptr :ptr])
+
+(ffi/defimport machine llvm LLVMCreateTargetMachine
+  :ptr [:ptr :string :string :string :uint32 :uint32 :uint32])
+
+(ffi/defimport init-x86-target-info llvm LLVMInitializeX86TargetInfo :void [])
+(ffi/defimport init-x86-target llvm LLVMInitializeX86Target :void [])
+(ffi/defimport init-x86-target-mc llvm LLVMInitializeX86TargetMC :void [])
+(ffi/defimport init-x86-asm-printer llvm LLVMInitializeX86AsmPrinter :void [])
+(ffi/defimport init-x86-asm-parser llvm LLVMInitializeX86AsmParser :void [])
+
+(ffi/defimport add-machine-passes llvm LLVMAddAnalysisPasses :ptr [:ptr :ptr])
+
+(defn ^:private init-x86 []
+  (init-x86-asm-printer)
+  (init-x86-asm-parser)
+  (init-x86-target-info)
+  (init-x86-target)
+  (init-x86-target-mc))
+
+(def ^:private targets
+  {"x86"    init-x86
+   "x86_64" init-x86})
+
+(def ^:private cpu
+  #?(:arch/x86    "x86"
+     :arch/x86-64 "x86-64"))
+
+(defn host-triple []
+  (util/message (default-triple)))
+
+(def jit (atom nil))
+
+(deftype JIT [triple machine stack resolver]
+  IPointerTarget
+  (-intptr [_] stack))
+
+(defn ^:private stack [jit]
+  (. jit stack))
+
+(defn ^:private resolver [jit]
+  (. jit resolver))
+
+(defn ^:private throw-jit-not-available-on [arch]
+  (throw (ex-info (str "JIT not available on target: " arch) {})))
+
+(defn ^:private boot []
+  (let [triple (host-triple)
+        arch   (first (str/split triple "-"))]
+    (println "Booting JIT on arch:" triple)
+    (if-let [init (get targets arch)]
+      (init)
+      (throw-jit-not-available-on arch))))
+
+(defn ^:private resolve-symbol [name _]
+  (let [name (str/subs name 1)
+        addr (dls host name)]
+    addr))
+
+(defn singleton []
+  (when (nil? @jit)
+    (boot)
+    (let [triple   (host-triple)
+          target   0
+          _        (triple-target triple target 0)
+          machine  (machine target triple cpu "" 0 0 1)
+          resolver (ffi/fnptr resolve-symbol :ptr [:string :ptr])]
+      (reset! jit (new JIT triple machine (make-jit machine) resolver))))
+  @jit)
+
+(defn register [unit]
+  ;; (print unit)
+  (if (emit/unit? unit)
+    (let [jit    (singleton)
+          passes (emit/optimizer-passes unit)]
+      (add-machine-passes (. jit machine) passes)
+      (emit/init-passes passes)
+      (add-eager-module (stack jit) (intptr unit) (resolver jit) 0))
+    ;; TODO: throw badarg
+    ))
+
+(defn resolve-address
+  "Resolve a name to a memory address"
+  [symbol]
+  (if (named? symbol)
+    (when-let [jit (singleton)]
+      (let [resolved (resolve (intptr jit) (name symbol))]
+        (ffi/not-null resolved)))
+    ;; TODO: return error
+    ))

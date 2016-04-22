@@ -1,0 +1,44 @@
+(ns torque.compiler.util
+  (:require [torque.ffi :as ffi]))
+
+(def ^:private libc (ffi/so "c"))
+(def ^:private llvm (ffi/so "LLVM"))
+
+(ffi/defimport malloc libc malloc :ptr [:uint64])
+(ffi/defimport strlen libc strnlen :uint64 [:ptr :uint64])
+(ffi/defimport memcpy libc memcpy :ptr [:ptr :ptr :sint64])
+
+(ffi/defimport dispose-message llvm LLVMDisposeMessage :void [:ptr])
+
+(def max-message-length 1024)
+
+(deftype Message [p]
+  IPrintable
+  (-str [_]
+    (let [len (strlen p max-message-length)
+          bin (make-binary len)]
+      (memcpy (intptr bin) p len)
+      (string bin)))
+  IResource
+  (-dispose [this]
+    (when p
+      (dispose-message p)
+      (set! this p nil))))
+
+(defn message [p]
+  (when-not (zero? p)
+    (with-resource [msg (new Message p)]
+      (str msg))))
+
+(defn ptrs-to-mem
+  "Copies a seq of pointers to an allocated native array.
+   The array is allocated with malloc and needs to be freed."
+  [ptrs]
+  (when-not (zero? (count ptrs))
+    (let [out (malloc (* (count ptrs) 8))]
+      (loop [ptrs (seq ptrs)
+             off  0]
+        (when-let [ptr (first ptrs)]
+          (memcpy (+ out off) (intptr (bytes ptr)) 8)
+          (recur (next ptrs) (+ off 8))))
+      out)))

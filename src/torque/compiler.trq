@@ -1,0 +1,172 @@
+;; -*- mode: clojure;-*-
+
+(ns torque.compiler
+  (:require
+    [torque.analyzer :as a]
+    [torque.analyzer.env :as env]
+    [torque.analyzer.torque :as trq]
+    [torque.analyzer.resolver :as r]
+    [torque.compiler.jit  :as jit]
+    [torque.compiler.emit :as emit]
+    [torque.io.fs :as fs]))
+
+(def ^:dynamic *compiler-env*
+  "The global environment of the compiler. This holds all name
+  sapce compiled so far"
+  (atom (a/empty-env)))
+
+(defn fun-context [fun builder]
+  {:fun fun :builder builder :env {:locals {}}})
+
+(defmulti -compile-ast (fn [ast ctx] (:op ast)))
+
+(def ^:dynamic compile-ast
+  -compile-ast)
+
+(defn compile-all [coll ctx]
+  (mapv
+    (fn [x]
+      (-compile-ast x ctx))
+    coll))
+
+(defmethod -compile-ast :default [ast ctx])
+
+(defmethod -compile-ast :const [ast ctx]
+  {:value
+   (cond
+     (= (:type ast) :nil)    emit/nil*
+     (= (:type ast) :bool)   (emit/bool (:val ast))
+     (= (:type ast) :number) (emit/int (:val ast)))})
+
+(defmethod -compile-ast :local [ast ctx]
+  (-> ctx :env :locals (get (:name ast))))
+
+(defmethod -compile-ast :do [ast ctx]
+  (loop [stmts (seq (:statements ast))]
+    (when-let [stmt (first stmts)]
+      (-compile-ast stmt ctx)
+      (recur (next stmts))))
+  (-compile-ast (:ret ast) ctx))
+
+(defn ^:private emit-bindings [ast ctx]
+  (reduce
+   (fn [ctx binding]
+     (let [value (-compile-ast (:init binding) ctx)]
+       (assoc-in ctx [:env :locals (:name binding)] value)))
+    ctx
+    (:bindings ast)))
+
+(defmethod -compile-ast :let [ast ctx]
+  (-compile-ast (:body ast) (emit-bindings ast ctx)))
+
+(defn ^:private emit-loop-storage [ast ctx]
+  (mapv
+   (fn [binding]
+      (let [init  (-compile-ast (:init binding) ctx)
+            label (name (:name binding))]
+        (emit/mutable-local (:builder ctx) (:value init) label)))
+    (:bindings ast)))
+
+(defn ^:private load-loop-bindings [builder bindings mutables]
+  (->> (map (fn [binding mutable]
+              (let [n (:name binding)]
+                [n {:value (emit/load builder mutable (name n))}]))
+            bindings
+            mutables)
+       (into {})))
+
+(defn ^:private emit-loop-ctx [ast mutables block ctx]
+  (let [loads  (load-loop-bindings (:builder ctx) (:bindings ast) mutables)
+        locals (update-in ctx [:env :locals] merge loads)]
+    (merge locals
+           {:recur-point block
+            :recur-bindings mutables})))
+
+(defmethod -compile-ast :loop [ast ctx]
+  (let [builder  (:builder ctx)
+        bindings (emit-loop-storage ast ctx)
+        label    (name (:loop-id ast))]
+    (emit/in-block builder label
+      (fn [block]
+        (->> (emit-loop-ctx ast bindings block ctx)
+             (-compile-ast (:body ast)))))))
+
+(defmethod -compile-ast :recur [ast ctx]
+  (let [builder (:builder ctx)]
+    (loop [bindings (:recur-bindings ctx)
+           values   (compile-all (:exprs ast) ctx)]
+      (let [binding (first bindings)
+            value   (first values)]
+        (when (and binding value)
+          (emit/store builder binding (:value value))
+          (recur (next bindings) (next values)))))
+    (emit/recur* builder (:recur-point ctx))
+    nil))
+
+(defn ^:private compile-with-builder [ast ctx]
+  (fn [builder]
+    (:value (-compile-ast ast (assoc ctx :builder builder)))))
+
+(defmethod -compile-ast :if [ast ctx]
+  {:value
+   (emit/if* (:builder ctx)
+     (compile-with-builder (:test ast) ctx)
+     (compile-with-builder (:then ast) ctx)
+     (compile-with-builder (:else ast) ctx))})
+
+(defn ^:private emit-instrinsic*
+  ([op ctx a b]
+   (cond
+     (= op "+")  (emit/add (:builder ctx) a b)
+     (= op "-")  (emit/sub (:builder ctx) a b)
+     (= op "*")  (emit/mul (:builder ctx) a b)
+     (= op "/")  (emit/div (:builder ctx) a b)
+     (= op "<")  (emit/cmp (:builder ctx) emit/lt a b)
+     (= op "<=") (emit/cmp (:builder ctx) emit/le a b)
+     (= op "==") (emit/cmp (:builder ctx) emit/eq a b)
+     (= op "!=") (emit/cmp (:builder ctx) emit/ne a b)
+     (= op ">")  (emit/cmp (:builder ctx) emit/gt a b)
+     (= op ">=") (emit/cmp (:builder ctx) emit/ge a b))))
+
+(defn ^:private emit-instrinsic [callable args ctx]
+  (let [op (name (:field callable))]
+    (apply emit-instrinsic* op ctx (map :value args))))
+
+(defmethod -compile-ast :invoke [ast ctx]
+  (let [callable (:fn ast)
+        args     (compile-all (:args ast) ctx)]
+    (cond
+      (= (:class callable) 'torque.core.builtin)
+        {:value (emit-instrinsic callable args ctx)})))
+
+(defmacro in-global-env [& body]
+  `(env/ensure *compiler-env*
+     ~@body))
+
+(defn eval-ast [ast]
+  ;; (print ast)
+  (let [name (name (gensym "eval"))
+        unit (emit/unit name)]
+    (emit/with-unit unit
+      (emit/define-fun! name emit/int8-ptr []
+        (fn [f b]
+          (-> (compile-ast ast (fun-context f b))
+              (:value)))))
+    (jit/register unit)
+    (invoke* (jit/resolve-address name) :native [])))
+
+(defn eval [form]
+  (binding [trq/*resolver* nil
+            trq/*eval*     eval-ast]
+    (in-global-env
+      (-> form trq/analyze eval-ast))))
+
+;; (defn compile-ns [ns]
+;;   (binding [trq/*resolver* (r/project-resolver (fs/cwd))
+;;             trq/*eval*     eval]
+;;     (in-global-env (trq/load-ns ns))
+;;     (when-let [ast (get-in @*compiler-env* [:namespaces ns])]
+;;       ;; TODO: here we would trigger a second compiler pass
+;;       ;; that optimizes the code and emits an object file
+;;       ;; (compile-ast ast (empty-context))
+;;       nil)))

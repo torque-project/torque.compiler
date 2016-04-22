@@ -1,0 +1,320 @@
+;; -*- mode: clojure;-*-
+
+(ns torque.compiler.emit
+  (:require
+    [torque.compiler.util :as util]
+    [torque.ffi :as ffi]))
+
+(def ^:private llvm (ffi/so "LLVM"))
+
+(ffi/defimport global-context llvm LLVMGetGlobalContext :ptr [])
+
+;; optimizer API
+(ffi/defimport pass-manager llvm LLVMCreateFunctionPassManagerForModule
+  :ptr [:ptr])
+(ffi/defimport init-passes llvm LLVMInitializeFunctionPassManager
+  :uint32 [:ptr])
+
+;; module API
+(ffi/defimport module llvm LLVMModuleCreateWithName :ptr [:string])
+(ffi/defimport dump llvm LLVMDumpModule :void [:ptr])
+(ffi/defimport add-fun! llvm LLVMAddFunction :ptr [:ptr :string :ptr])
+(ffi/defimport get-fun llvm LLVMGetNamedFunction :ptr [:ptr :string])
+(ffi/defimport add-global! llvm LLVMAddGlobal :ptr [:ptr :ptr :string])
+(ffi/defimport set-init! llvm LLVMSetInitializer :void [:ptr :ptr])
+
+;; function API
+(ffi/defimport add-block! llvm LLVMAppendBasicBlock :ptr [:ptr :string])
+
+;; builder API
+(ffi/defimport -builder llvm LLVMCreateBuilder :ptr [])
+(ffi/defimport builder-fun llvm LLVMGetBasicBlockParent :ptr [:ptr])
+(ffi/defimport get-insert-block llvm LLVMGetInsertBlock :ptr [:ptr])
+(ffi/defimport set-insert-block! llvm LLVMPositionBuilderAtEnd :ptr [:ptr :ptr])
+(ffi/defimport dispose-builder llvm LLVMDisposeBuilder :void [:ptr])
+(ffi/defimport -return  llvm LLVMBuildRet :ptr [:ptr :ptr])
+(ffi/defimport call llvm LLVMBuildCall :ptr [:ptr :ptr :ptr :uint32 :string])
+(ffi/defimport -add llvm LLVMBuildAdd :ptr [:ptr :ptr :ptr :string])
+(ffi/defimport -sub llvm LLVMBuildSub :ptr [:ptr :ptr :ptr :string])
+(ffi/defimport -mul llvm LLVMBuildMul :ptr [:ptr :ptr :ptr :string])
+(ffi/defimport -div llvm LLVMBuildSDiv :ptr [:ptr :ptr :ptr :string])
+(ffi/defimport -icmp llvm LLVMBuildICmp :ptr [:ptr :uint32 :ptr :ptr :string])
+(ffi/defimport br llvm LLVMBuildBr :void [:ptr :ptr])
+(ffi/defimport cond-br llvm LLVMBuildCondBr :ptr [:ptr :ptr :ptr :ptr])
+(ffi/defimport phi llvm LLVMBuildPhi :ptr [:ptr :ptr :string])
+(ffi/defimport add-incoming! llvm LLVMAddIncoming :void [:ptr :ptr :ptr :uint32])
+(ffi/defimport alloca llvm LLVMBuildAlloca :ptr [:ptr :ptr :string])
+(ffi/defimport -store llvm LLVMBuildStore :ptr [:ptr :ptr :ptr])
+(ffi/defimport -load llvm LLVMBuildLoad :ptr [:ptr :ptr :string])
+
+;; utilities
+(ffi/defimport typeof llvm LLVMTypeOf :ptr [:ptr])
+(ffi/defimport kind   llvm LLVMGetTypeKind :uint32 [:ptr])
+
+(ffi/defimport pr-module llvm LLVMPrintModuleToString :ptr [:ptr])
+(ffi/defimport pr-type   llvm LLVMPrintTypeToString :ptr [:ptr])
+(ffi/defimport pr-value  llvm LLVMPrintValueToString :ptr [:ptr])
+
+;; constants
+(ffi/defimport const-null llvm LLVMConstNull :ptr [:ptr])
+(ffi/defimport const-int  llvm LLVMConstInt :ptr [:ptr :uint64 :bool])
+
+;; type constructors
+(ffi/defimport fun-type llvm LLVMFunctionType :ptr [:ptr :ptr :uint32 :bool])
+(ffi/defimport ptr-type llvm LLVMPointerType :ptr [:ptr :uint32])
+(ffi/defimport arr-type llvm LLVMArrayType :ptr [:ptr :uint32])
+(ffi/defimport void-type llvm LLVMVoidType :ptr [])
+(ffi/defimport int1-type llvm LLVMInt1Type :ptr [])
+(ffi/defimport int8-type llvm LLVMInt8Type :ptr [])
+(ffi/defimport int16-type llvm LLVMInt16Type :ptr [])
+(ffi/defimport int32-type llvm LLVMInt32Type :ptr [])
+(ffi/defimport int64-type llvm LLVMInt64Type :ptr [])
+
+;; predefined types
+(def void  (void-type))
+(def int1  (int1-type))
+(def int8  (int8-type))
+(def int16 (int16-type))
+(def int32 (int32-type))
+(def int64 (int64-type))
+
+(def int8-ptr (ptr-type int8 0))
+(def int8-ptr-ptr (ptr-type int8-ptr 0))
+
+(def int-kind 8)
+(def ptr-kind 12)
+
+(def eq 32)
+(def ne 33)
+(def gt 38)
+(def ge 39)
+(def lt 40)
+(def le 41)
+
+(def ^:dynamic *unit*
+  "The currently emitted compilation unit"
+  nil)
+
+(deftype Unit [handle pass-manager]
+
+  IPrintable
+  (-str [_]
+    (if (ffi/not-null handle)
+      (util/message (pr-module handle))
+      "<unit: null>"))
+
+  IPointerTarget
+  (-intptr [_] handle))
+
+(defn unit [n]
+  (let [m (module n)]
+    (new Unit m (pass-manager m))))
+
+(defn unit? [x]
+  (instance? Unit x))
+
+(defn optimizer-passes [x]
+  (. x pass-manager))
+
+(defmacro with-unit [unit & forms]
+  `(binding [*unit* ~unit]
+     ~@forms
+     *unit*))
+
+(deftype Value [handle]
+  IPrintable
+  (-str [_]
+    (if (ffi/not-null handle)
+      (util/message (pr-value handle))
+      "<value: null>"))
+  IPointerTarget
+  (-intptr [_] handle))
+
+(defn value [handle]
+  (new Value handle))
+
+(defn value? [x]
+  (instance? Value x))
+
+(deftype Builder [handle]
+  IResource
+  (-dispose [_]
+    (dispose-builder handle))
+  IPointerTarget
+  (-intptr [_] handle))
+
+(defn builder
+  ([]
+   (new Builder (-builder)))
+  ([block]
+   (let [b (builder)]
+     (set-insert-block! (intptr b) (intptr block))
+     b)))
+
+(defn in-block [b name block-fn]
+  (let [fun   (builder-fun (get-insert-block (intptr b)))
+        block (add-block! fun name)]
+    (br (intptr b) block)
+    (set-insert-block! (intptr b) block)
+    (block-fn block)))
+
+(defmacro with-block [builder block & forms]
+  `(let [tmp# (get-insert-block (intptr ~builder))]
+     (set-insert-block! (intptr ~builder) ~block)
+     (let [ret# (do ~@forms)]
+       (set-insert-block! (intptr ~builder) tmp#)
+       ret#)))
+
+(deftype Type [name global])
+
+;; constant values
+(def nil* (value (const-null int8-ptr)))
+
+(defn bool [x]
+  (if (boolean? x)
+    (value
+      (if x
+        (const-int int1 1 false)
+        (const-int int1 0 false)))
+    ;; TODO: error
+    ))
+
+(defn int [x]
+  (if (integer? x)
+    (value (const-int int64 x true))
+    ;; TODO: error
+    ))
+
+(defn mutable-local [builder val name]
+  (let [local (alloca (intptr builder) (typeof (intptr val)) name)]
+    (-store (intptr builder) (intptr val) local)
+    (value local)))
+
+(defn store [builder mutable val]
+  (value (-store (intptr builder) (intptr val) (intptr mutable))))
+
+(defn load [builder mutable name]
+  (value (-load (intptr builder) (intptr mutable) name)))
+
+(defn declare-fun! [name ret args]
+  (let [ptrs (util/ptrs-to-mem args)
+        type (fun-type ret ptrs (count args) false)]
+    (or (ffi/not-null (get-fun (intptr *unit*) name))
+        (add-fun! (intptr *unit*) name type))))
+
+(defn new* [builder name args]
+  (let [num    (count args)
+        types  (mapv (fn [x] (typeof (intptr x))) args)
+        values (mapv (fn [x] (intptr x)) args)
+        ctor   (declare-fun! (str name "_new") int8-ptr types)]
+    (-> (intptr builder)
+        (call ctor (util/ptrs-to-mem values) num "")
+        (value))))
+
+(defn box [builder x]
+  (when x
+    (if (= (-> x intptr typeof kind) int-kind)
+      (new* builder "Integer" [x])
+      x)))
+
+(defn return [builder value]
+  (-return (intptr builder) (intptr (box builder value))))
+
+(defn define-fun! [name ret args body-fn]
+  (let [type  (fun-type ret (util/ptrs-to-mem args) (count args) false)
+        fun   (add-fun! (intptr *unit*) name type)
+        entry (value (add-block! fun "entry"))]
+    (with-resource [b (builder entry)]
+      (return b (body-fn fun b)))))
+
+(defn add [builder a b]
+  ;; TODO: implement unboxing if types are known. if not,
+  ;; check if we can do a dynamic dispatch
+  (value (-add (intptr builder) (intptr a) (intptr b) "")))
+
+(defn sub [builder a b]
+  ;; TODO: implement unboxing if types are known. if not,
+  ;; check if we can do a dynamic dispatch
+  (value (-sub (intptr builder) (intptr a) (intptr b) "")))
+
+(defn mul [builder a b]
+  ;; TODO: implement unboxing if types are known. if not,
+  ;; check if we can do a dynamic dispatch
+  (value (-mul (intptr builder) (intptr a) (intptr b) "")))
+
+(defn div [builder a b]
+  ;; TODO: implement unboxing if types are known. if not,
+  ;; check if we can do a dynamic dispatch
+  (value (-div (intptr builder) (intptr a) (intptr b) "")))
+
+(defn cmp [builder op a b]
+  ;; TODO: implement unboxing if types are known. if not,
+  ;; check if we can do a dynamic dispatch
+  (value (-icmp (intptr builder) op (intptr a) (intptr b) "")))
+
+(defn ^:private not-nil? [builder x]
+  (-icmp (intptr builder) ne (intptr nil*) (intptr x) ""))
+
+(defn ^:private truthy [builder x]
+  (if (= (kind (typeof (intptr x))) ptr-kind)
+    (value (not-nil? builder x))
+    x))
+
+(defn ^:private branch [builder block cont branch-fn]
+  (set-insert-block! (intptr builder) block)
+  (when-let [x (box builder (branch-fn builder))]
+    (br (intptr builder) cont)
+    x))
+
+(defn ^:private cont [builder block values blocks]
+  (set-insert-block! (intptr builder) block)
+  (let [phi-value (phi (intptr builder) int8-ptr "")]
+    (loop [blocks blocks
+           values values]
+      (let [block (first blocks)
+            value (first values)]
+        (when block
+          (when value
+            (add-incoming! phi-value
+              (util/ptrs-to-mem [(intptr value)])
+              (util/ptrs-to-mem [block])
+              1))
+          (recur (next blocks) (next values)))))
+    (value phi-value)))
+
+(defn if* [builder test-fn then-fn else-fn]
+  (let [fun        (builder-fun (get-insert-block (intptr builder)))
+        then-block (add-block! fun "then")
+        else-block (add-block! fun "else")
+        cont-block (add-block! fun "cont")
+        test       (cond-br (intptr builder)
+                            (intptr (truthy builder (test-fn builder)))
+                            then-block
+                            else-block)
+        then-value (branch builder then-block cont-block then-fn)
+        else-value (branch builder else-block cont-block else-fn)]
+    (cont builder cont-block
+      [then-value else-value]
+      [then-block else-block])))
+
+(defn recur* [builder point]
+  (br (intptr builder) point))
+
+;; (defn declare-type [name]
+;;   (doto (ffi/not-null (named-type (global-context) name))
+;;     (type-body
+;;       []
+;;       0
+;;       false)))
+
+;; (defn add-rt-type! [unit name fields]
+;;   (declare-type name))
+
+;; (defn rt0
+;;   "Creates and returns a compilation unit of runtime
+;;    types and functions that have to be present before any
+;;    clojure code can be compiled"
+;;   []
+;;   (if-let [unit (ffi/not-null (unit "rt0"))]
+;;     (doto unit
+;;       (add-rt-type! "Type" [int8-ptr]))))
