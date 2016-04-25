@@ -14,7 +14,8 @@
 (ffi/defimport make-jit llvm LLVMOrcCreateInstance :ptr [:ptr])
 (ffi/defimport free-jit llvm LLVMOrcDisposeInstance :void [:ptr])
 
-(ffi/defimport resolve llvm LLVMOrcGetSymbolAddress :ptr [:ptr :string])
+(ffi/defimport mangle llvm LLVMOrcGetMangledSymbol :void [:ptr ^:out :ptr :string])
+(ffi/defimport resolve llvm LLVMOrcGetSymbolAddress :ptr [:ptr :ptr])
 
 (ffi/defimport add-eager-module llvm LLVMOrcAddEagerlyCompiledIR
   :uint32 [:ptr :ptr :ptr :ptr])
@@ -82,7 +83,7 @@
       (throw-jit-not-available-on arch))))
 
 (defn ^:private resolve-symbol [name _]
-  (let [name (str/subs name 1)
+  (let [name (if (== (str/at name 0) \_) (str/subs name 1) name)
         addr (dls host name)]
     addr))
 
@@ -94,7 +95,7 @@
           _        (triple-target triple target 0)
           machine  (machine target triple cpu "" 0 0 1)
           resolver (ffi/fnptr resolve-symbol :ptr [:string :ptr])]
-      (reset! jit (new JIT triple machine (make-jit machine) resolver))))
+    (reset! jit (new JIT triple machine (make-jit machine) resolver))))
   @jit)
 
 (defn register [unit]
@@ -104,7 +105,7 @@
           passes (emit/optimizer-passes unit)]
       (add-machine-passes (. jit machine) passes)
       (emit/init-passes passes)
-      (add-eager-module (stack jit) (intptr unit) (resolver jit) 0))
+      (add-lazy-module (stack jit) (intptr unit) (resolver jit) 0))
     ;; TODO: throw badarg
     ))
 
@@ -113,7 +114,9 @@
   [symbol]
   (if (named? symbol)
     (when-let [jit (singleton)]
-      (let [resolved (resolve (intptr jit) (name symbol))]
-        (ffi/not-null resolved)))
+      (let [mangled  0
+            _ (mangle (intptr jit) mangled (name symbol))
+            resolved (resolve (intptr jit) mangled)]
+	(ffi/not-null resolved)))
     ;; TODO: return error
     ))

@@ -153,7 +153,8 @@
           (-> (compile-ast ast (fun-context f b))
               (:value)))))
     (jit/register unit)
-    (invoke* (jit/resolve-address name) :native [])))
+    (when-let [addr (jit/resolve-address name)]
+      (invoke* addr :native []))))
 
 (defn eval [form]
   (binding [trq/*resolver* nil
