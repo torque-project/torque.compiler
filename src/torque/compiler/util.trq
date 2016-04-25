@@ -10,7 +10,7 @@
 
 (ffi/defimport dispose-message llvm LLVMDisposeMessage :void [:ptr])
 
-(def max-message-length 1024)
+(def max-message-length 4096)
 
 (deftype Message [p]
   IPrintable
@@ -30,6 +30,9 @@
     (with-resource [msg (new Message p)]
       (str msg))))
 
+(defn ptr-bytes [x]
+  (-> x intptr bytes intptr))
+
 (defn ptrs-to-mem
   "Copies a seq of pointers to an allocated native array.
    The array is allocated with malloc and needs to be freed."
@@ -39,6 +42,6 @@
       (loop [ptrs (seq ptrs)
              off  0]
         (when-let [ptr (first ptrs)]
-          (memcpy (+ out off) (intptr (bytes ptr)) 8)
+          (memcpy (+ out off) (ptr-bytes ptr) 8)
           (recur (next ptrs) (+ off 8))))
       out)))

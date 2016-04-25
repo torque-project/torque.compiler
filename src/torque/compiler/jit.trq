@@ -99,7 +99,7 @@
   @jit)
 
 (defn register [unit]
-  ;; (print unit)
+  ;;(print unit)
   (if (emit/unit? unit)
     (let [jit    (singleton)
           passes (emit/optimizer-passes unit)]

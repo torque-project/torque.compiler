@@ -25,6 +25,7 @@
 
 ;; function API
 (ffi/defimport add-block! llvm LLVMAppendBasicBlock :ptr [:ptr :string])
+(ffi/defimport get-arg llvm LLVMGetParam :ptr [:ptr :uint32])
 
 ;; builder API
 (ffi/defimport -builder llvm LLVMCreateBuilder :ptr [])
@@ -46,9 +47,12 @@
 (ffi/defimport alloca llvm LLVMBuildAlloca :ptr [:ptr :ptr :string])
 (ffi/defimport -store llvm LLVMBuildStore :ptr [:ptr :ptr :ptr])
 (ffi/defimport -load llvm LLVMBuildLoad :ptr [:ptr :ptr :string])
+(ffi/defimport -cast llvm LLVMBuildBitCast :ptr [:ptr :ptr :ptr :string])
+(ffi/defimport malloc llvm LLVMBuildMalloc :ptr [:ptr :ptr :string])
+(ffi/defimport struct-gep llvm LLVMBuildStructGEP :ptr [:ptr :ptr :uint32 :string])
 
 ;; utilities
-(ffi/defimport typeof llvm LLVMTypeOf :ptr [:ptr])
+(ffi/defimport get-type llvm LLVMTypeOf :ptr [:ptr])
 (ffi/defimport kind   llvm LLVMGetTypeKind :uint32 [:ptr])
 
 (ffi/defimport pr-module llvm LLVMPrintModuleToString :ptr [:ptr])
@@ -58,8 +62,16 @@
 ;; constants
 (ffi/defimport const-null llvm LLVMConstNull :ptr [:ptr])
 (ffi/defimport const-int  llvm LLVMConstInt :ptr [:ptr :uint64 :bool])
+(ffi/defimport const-array llvm LLVMConstArray :ptr [:ptr :ptr :uint32])
+(ffi/defimport const-struct llvm LLVMConstStruct :ptr [:ptr :uint32 :bool])
+(ffi/defimport const-typed llvm LLVMConstNamedStruct :ptr [:ptr :ptr :uint32])
+(ffi/defimport const-cast llvm LLVMConstBitCast :ptr [:ptr :ptr])
+(ffi/defimport const-gep llvm LLVMConstInBoundsGEP :ptr [:ptr :ptr :uint32])
 
 ;; type constructors
+(ffi/defimport named-type llvm LLVMStructCreateNamed :ptr [:ptr :string])
+(ffi/defimport type-body llvm LLVMStructSetBody :void [:ptr :ptr :uint32 :bool])
+(ffi/defimport anon-type llvm LLVMStructType :ptr [:ptr :uint32 :bool])
 (ffi/defimport fun-type llvm LLVMFunctionType :ptr [:ptr :ptr :uint32 :bool])
 (ffi/defimport ptr-type llvm LLVMPointerType :ptr [:ptr :uint32])
 (ffi/defimport arr-type llvm LLVMArrayType :ptr [:ptr :uint32])
@@ -91,6 +103,9 @@
 (def lt 40)
 (def le 41)
 
+(defprotocol ITyped
+  (-typeof [_]))
+
 (def ^:dynamic *unit*
   "The currently emitted compilation unit"
   nil)
@@ -120,6 +135,19 @@
   `(binding [*unit* ~unit]
      ~@forms
      *unit*))
+(deftype Type [handle]
+  IPrintable
+  (-str [_]
+    (util/message (pr-type handle)))
+
+  IPointerTarget
+  (-intptr [_] handle)
+
+  ITyped
+  (-typeof [this] this))
+
+(defn type [x]
+  (new Type x))
 
 (deftype Value [handle]
   IPrintable
@@ -128,7 +156,10 @@
       (util/message (pr-value handle))
       "<value: null>"))
   IPointerTarget
-  (-intptr [_] handle))
+  (-intptr [_] handle)
+
+  ITyped
+  (-typeof [_] (type (get-type handle))))
 
 (defn value [handle]
   (new Value handle))
@@ -165,7 +196,14 @@
        (set-insert-block! (intptr ~builder) tmp#)
        ret#)))
 
-(deftype Type [name global])
+(defn type-of [x]
+  (-typeof x))
+
+(defn ptr-of [x]
+  (type (ptr-type (intptr (type-of x)) 0)))
+
+(defn array-type [t n]
+  (type (arr-type (intptr t) n)))
 
 ;; constant values
 (def nil* (value (const-null int8-ptr)))
@@ -179,14 +217,17 @@
     ;; TODO: error
     ))
 
-(defn int [x]
-  (if (integer? x)
-    (value (const-int int64 x true))
-    ;; TODO: error
-    ))
+(defn int
+  ([x]
+   (int int64 x))
+  ([t x]
+   (if (integer? x)
+     (value (const-int t x true))
+     ;; TODO: error
+     )))
 
 (defn mutable-local [builder val name]
-  (let [local (alloca (intptr builder) (typeof (intptr val)) name)]
+  (let [local (alloca (intptr builder) (type-of val) name)]
     (-store (intptr builder) (intptr val) local)
     (value local)))
 
@@ -196,6 +237,17 @@
 (defn load [builder mutable name]
   (value (-load (intptr builder) (intptr mutable) name)))
 
+(defn bitcast
+  ([val type]
+   (value (const-cast (intptr val) (intptr type))))
+  ([builder val type]
+   (value (-cast (intptr builder) (intptr val) (intptr type) ""))))
+
+(defn mangle [name fn]
+  (if (:variadic? fn)
+    (str name "_variadic")
+    (str name "_" (:fixed-arity fn))))
+
 (defn declare-fun! [name ret args]
   (let [ptrs (util/ptrs-to-mem args)
         type (fun-type ret ptrs (count args) false)]
@@ -204,18 +256,41 @@
 
 (defn new* [builder name args]
   (let [num    (count args)
-        types  (mapv (fn [x] (typeof (intptr x))) args)
+        types  (mapv (fn [x] (type-of x)) args)
         values (mapv (fn [x] (intptr x)) args)
         ctor   (declare-fun! (str name "_new") int8-ptr types)]
     (-> (intptr builder)
         (call ctor (util/ptrs-to-mem values) num "")
         (value))))
 
+(defn deref
+  ([val]
+   (const-gep (intptr val) (util/ptrs-to-mem [(int int32 0)]) 1)))
+
+(def box-type
+  (type (anon-type (util/ptrs-to-mem [int8-ptr int8-ptr int64]) 3 false)))
+
+(def box-ptr
+  (ptr-of box-type))
+
 (defn box [builder x]
   (when x
-    (if (= (-> x intptr typeof kind) int-kind)
+    (if (= (-> x type-of intptr kind) int-kind)
       (new* builder "Integer" [x])
       x)))
+
+(defn unbox [builder x]
+  (if (= (-> x type-of intptr kind) int-kind)
+    x
+    (let [box (bitcast builder x box-ptr)
+          ptr (struct-gep (intptr builder) (intptr box) 2 "")]
+      (value (-load (intptr builder) ptr "")))))
+
+(defn allocate [builder t]
+  (value (malloc (intptr builder) (intptr t) "")))
+
+(defn set-field [builder inst n val]
+  (store builder (struct-gep (intptr builder) (intptr inst) n "") val))
 
 (defn return [builder value]
   (-return (intptr builder) (intptr (box builder value))))
@@ -225,12 +300,22 @@
         fun   (add-fun! (intptr *unit*) name type)
         entry (value (add-block! fun "entry"))]
     (with-resource [b (builder entry)]
-      (return b (body-fn fun b)))))
+      (return b (body-fn fun b)))
+    fun))
+
+(defn arg [fun n]
+  (value (get-arg fun n)))
+
+(defn fn-arg [fun n]
+  (arg fun (inc n)))
 
 (defn add [builder a b]
   ;; TODO: implement unboxing if types are known. if not,
   ;; check if we can do a dynamic dispatch
-  (value (-add (intptr builder) (intptr a) (intptr b) "")))
+  (value (-add (intptr builder)
+               (intptr (unbox builder a))
+               (intptr (unbox builder b))
+               "")))
 
 (defn sub [builder a b]
   ;; TODO: implement unboxing if types are known. if not,
@@ -256,7 +341,7 @@
   (-icmp (intptr builder) ne (intptr nil*) (intptr x) ""))
 
 (defn ^:private truthy [builder x]
-  (if (= (kind (typeof (intptr x))) ptr-kind)
+  (if (= (kind (intptr (type-of x))) ptr-kind)
     (value (not-nil? builder x))
     x))
 
@@ -300,21 +385,27 @@
 (defn recur* [builder point]
   (br (intptr builder) point))
 
-;; (defn declare-type [name]
-;;   (doto (ffi/not-null (named-type (global-context) name))
-;;     (type-body
-;;       []
-;;       0
-;;       false)))
+(defn global
+  ([name init]
+   (global name (type-of init) init))
+  ([name type init]
+   (let [g (add-global! (intptr *unit*) (intptr type) name)]
+     (set-init! g (if init (intptr init) nil*))
+     (value g))))
 
-;; (defn add-rt-type! [unit name fields]
-;;   (declare-type name))
+(defn array [type vals]
+  (let [ptrs (util/ptrs-to-mem vals)]
+    (value (const-array (intptr type) ptrs (count vals)))))
 
-;; (defn rt0
-;;   "Creates and returns a compilation unit of runtime
-;;    types and functions that have to be present before any
-;;    clojure code can be compiled"
-;;   []
-;;   (if-let [unit (ffi/not-null (unit "rt0"))]
-;;     (doto unit
-;;       (add-rt-type! "Type" [int8-ptr]))))
+(defn define-struct [name field-types]
+  (let [t    (named-type (global-context) name)
+        ptrs (util/ptrs-to-mem field-types)]
+    (type-body t ptrs (count field-types) false)
+    (type t)))
+
+(defn struct
+  ([fields]
+   (value (const-struct (util/ptrs-to-mem fields) (count fields) false)))
+  ([t fields]
+   (value (const-typed (intptr t) (util/ptrs-to-mem fields) (count fields)))))
+

@@ -39,7 +39,7 @@
      (= (:type ast) :number) (emit/int (:val ast)))})
 
 (defmethod -compile-ast :local [ast ctx]
-  (-> ctx :env :locals (get (:name ast))))
+  {:value (-> ctx :env :locals (get (:name ast)))})
 
 (defmethod -compile-ast :do [ast ctx]
   (loop [stmts (seq (:statements ast))]
@@ -113,6 +113,113 @@
      (compile-with-builder (:test ast) ctx)
      (compile-with-builder (:then ast) ctx)
      (compile-with-builder (:else ast) ctx))})
+
+(defn log [x]
+  (println "LOG" x)
+  x)
+
+(def arities-table
+  (emit/define-struct "Method" [(emit/array-type emit/int8-ptr 8)]))
+
+(def dispatch-entry
+  (emit/define-struct "DispatchEntry"
+    [emit/int32 (emit/ptr-of arities-table)]))
+
+(def dispatch-table (emit/ptr-of dispatch-entry))
+
+(defn ^:private emit-protocol-meth [arities]
+  (->> (reduce
+        (fn [v impl]
+          (assoc v (inc (:arity impl)) (emit/bitcast (:value impl) emit/int8-ptr)))
+        (vec (replicate 8 emit/nil*))
+        arities)
+       (emit/array emit/int8-ptr)
+       (vector)
+       (emit/struct arities-table)))
+
+(defn swizzle-cast [type val]
+  (emit/bitcast val type))
+
+(defn ^:private emit-protocol [name impls]
+  (->> impls
+       (mapv
+        (fn [impl]
+          (emit-protocol-meth impl)))
+       (emit/array arities-table)
+       (emit/global "")
+       (swizzle-cast (emit/ptr-of arities-table))
+       (vector (emit/int emit/int32 name))
+       (emit/struct dispatch-entry)))
+
+(defn ^:private emit-protocol* [name & impls]
+  (emit-protocol name impls))
+
+(defn ^:private emit-type [name protocols]
+  (let [name           (str name "_type")
+        table-size     (emit/int emit/int32 (count protocols))
+        protocol-table (emit/bitcast
+                         (emit/global ""
+                           (emit/array dispatch-entry protocols))
+                         dispatch-table)
+        struct         (emit/define-struct name [emit/int32 dispatch-table])]
+    (->> (emit/struct struct [table-size protocol-table])
+         (emit/global name struct))))
+
+(defn ^:private emit-ctor [name type instance-struct field-types]
+  (emit/define-fun! (str name "_new") emit/int8-ptr field-types
+    (fn [fun builder]
+      (let [instance (emit/allocate builder instance-struct)]
+        (emit/set-field builder instance 0 type)
+        (loop [n     0
+               types field-types]
+          (when-let [type (first field-types)]
+            (emit/set-field builder instance (inc n) (emit/arg fun n))
+            (recur (inc n) (next field-types))))
+        instance))))
+
+(defmethod -compile-ast :fn [ast ctx]
+  (let [name  (name (or (:local ast) (gensym "FN")))
+        qname (str (:ns @*compiler-env*) "_" name)
+        meths (compile-all (:methods ast) (assoc ctx :tag qname))
+        type  (emit-type qname [(emit-protocol* 43 meths)])
+        inst  (emit/define-struct qname [(emit/type-of type)])]
+    (emit-ctor qname type inst [])
+    {:value (emit/new* (:builder ctx) qname [])}))
+
+(defn ^:private emit-params [ast ctx]
+  (reduce
+    (fn [ctx binding]
+      (let [value (emit/fn-arg (:fun ctx) (:arg-id binding))]
+        (assoc-in ctx
+          [:env :locals (:name binding)]
+          value)))
+    ctx
+    (:params ast)))
+
+(defn ^:private emit-closed-overs [ast ctx]
+  ctx)
+
+(defn ^:private arg-types [ast]
+  ;; TODO: emit optimized fn types
+  (replicate (inc (count (:params ast))) emit/int8-ptr))
+
+(defmethod -compile-ast :fn-method [ast ctx]
+  (let [name (emit/mangle (:tag ctx) ast)]
+    {:arity (:fixed-arity ast)
+     :value
+     (emit/define-fun! name emit/int8-ptr (arg-types ast)
+       (fn [fun builder]
+         (->> (fun-context fun builder)
+              (emit-closed-overs ast)
+              (emit-params ast)
+              (-compile-ast (:body ast))
+              :value)))}))
+
+(defmethod -compile-ast :deftype [ast ctx])
+
+(defmethod -compile-ast :protocol [ast ctx])
+
+(defmethod -compile-ast :def [ast ctx])
 
 (defn ^:private emit-instrinsic*
   ([op ctx a b]
