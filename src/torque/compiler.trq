@@ -146,7 +146,6 @@
   (emit/bitcast val type))
 
 (defn ^:private emit-protocol [name id impls]
-  (print name)
   (->> impls
        (mapv
         (fn [impl]
@@ -235,7 +234,7 @@
 (defn ^:private emit-protocol-call [builder callable protocol meth arity args]
   (let [ptr (load-dispatch-table builder protocol meth arity)
         args (cons callable args)
-        fun  (emit/fun-from-args builder ptr args)]
+        fun  (emit/fun-from-args builder ptr emit/int8-ptr args)]
     (emit/call builder fun args)))
 
 (defn ^:private emit-protocol-call* [ctx callable id meth arity args]
@@ -300,7 +299,7 @@
         0
         arity
         (map (fn [x] (emit/box (:builder ctx) (:value x))) args))
-      ;; otherwise accumulate args in last argument and call with arity 8
+      ;; TODO: otherwise accumulate args in last argument and call with arity 8
       ))
   ;; in fn:
   ;;   implement fixed arity call directly when args < 8

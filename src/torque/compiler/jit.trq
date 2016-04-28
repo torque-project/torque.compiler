@@ -83,7 +83,6 @@
       (throw-jit-not-available-on arch))))
 
 (defn ^:private resolve-symbol [name _]
-  (print "TEST")
   (let [name (if (== (str/at name 0) \_) (str/subs name 1) name)
         addr (dls host name)]
     addr))
@@ -100,7 +99,7 @@
   @jit)
 
 (defn register [unit]
-  (print unit)
+  ;; (print unit)
   (if (emit/unit? unit)
     (let [jit    (singleton)
           passes (emit/optimizer-passes unit)]

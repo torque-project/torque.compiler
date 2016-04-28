@@ -260,14 +260,14 @@
     (or (ffi/not-null (get-fun (intptr *unit*) name))
         (add-fun! (intptr *unit*) name type))))
 
-(defn fun-from-args [builder ptr args]
-  (bitcast builder
-    ptr
-    (ptr-of
-       (type (fun-type int8-ptr
-                       (util/ptrs-to-mem (map type-of args))
-                       (count args)
-                       false)))))
+(defn fun-from-args [builder ptr ret args]
+  (->> (fun-type ret
+                 (util/ptrs-to-mem (map type-of args))
+                 (count args)
+                 false)
+       (type)
+       (ptr-of)
+       (bitcast builder ptr)))
 
 (defn call [builder fun args]
   (value
