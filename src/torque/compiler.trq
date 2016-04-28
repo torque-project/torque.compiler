@@ -15,6 +15,20 @@
   sapce compiled so far"
   (atom (a/empty-env)))
 
+(def arities-table
+  (emit/define-struct "Method" [(emit/array-type emit/int8-ptr 8)]))
+
+(def dispatch-entry
+  (emit/define-struct "DispatchEntry"
+    [emit/int32 (emit/ptr-of arities-table)]))
+
+(def dispatch-table (emit/ptr-of dispatch-entry))
+
+(def Type   (emit/define-struct "TrqType" [emit/int32 dispatch-table]))
+(def TypeP  (emit/ptr-of Type))
+(def Value  (emit/define-struct "TrqValue" [(emit/ptr-of Type)]))
+(def ValueP (emit/ptr-of Value))
+
 (defn fun-context [fun builder]
   {:fun fun :builder builder :env {:locals {}}})
 
@@ -118,15 +132,6 @@
   (println "LOG" x)
   x)
 
-(def arities-table
-  (emit/define-struct "Method" [(emit/array-type emit/int8-ptr 8)]))
-
-(def dispatch-entry
-  (emit/define-struct "DispatchEntry"
-    [emit/int32 (emit/ptr-of arities-table)]))
-
-(def dispatch-table (emit/ptr-of dispatch-entry))
-
 (defn ^:private emit-protocol-meth [arities]
   (->> (reduce
         (fn [v impl]
@@ -140,30 +145,30 @@
 (defn swizzle-cast [type val]
   (emit/bitcast val type))
 
-(defn ^:private emit-protocol [name impls]
+(defn ^:private emit-protocol [name id impls]
+  (print name)
   (->> impls
        (mapv
         (fn [impl]
           (emit-protocol-meth impl)))
        (emit/array arities-table)
-       (emit/global "")
+       (emit/global (str name "_methods"))
        (swizzle-cast (emit/ptr-of arities-table))
-       (vector (emit/int emit/int32 name))
+       (vector (emit/int emit/int32 id))
        (emit/struct dispatch-entry)))
 
-(defn ^:private emit-protocol* [name & impls]
-  (emit-protocol name impls))
+(defn ^:private emit-protocol* [name id & impls]
+  (emit-protocol name id impls))
 
 (defn ^:private emit-type [name protocols]
-  (let [name           (str name "_type")
+  (let [type-name      (str name "_type")
         table-size     (emit/int emit/int32 (count protocols))
         protocol-table (emit/bitcast
-                         (emit/global ""
+                         (emit/global (str name "_entries")
                            (emit/array dispatch-entry protocols))
-                         dispatch-table)
-        struct         (emit/define-struct name [emit/int32 dispatch-table])]
-    (->> (emit/struct struct [table-size protocol-table])
-         (emit/global name struct))))
+                         dispatch-table)]
+    (->> (emit/struct Type [table-size protocol-table])
+         (emit/global type-name Type))))
 
 (defn ^:private emit-ctor [name type instance-struct field-types]
   (emit/define-fun! (str name "_new") emit/int8-ptr field-types
@@ -175,13 +180,13 @@
           (when-let [type (first field-types)]
             (emit/set-field builder instance (inc n) (emit/arg fun n))
             (recur (inc n) (next field-types))))
-        instance))))
+        (emit/bitcast builder instance emit/int8-ptr)))))
 
 (defmethod -compile-ast :fn [ast ctx]
   (let [name  (name (or (:local ast) (gensym "FN")))
-        qname (str (:ns @*compiler-env*) "_" name)
+        qname name ;; (str (:ns @*compiler-env*) "_" name)
         meths (compile-all (:methods ast) (assoc ctx :tag qname))
-        type  (emit-type qname [(emit-protocol* 43 meths)])
+        type  (emit-type qname [(emit-protocol* qname 43 meths)])
         inst  (emit/define-struct qname [(emit/type-of type)])]
     (emit-ctor qname type inst [])
     {:value (emit/new* (:builder ctx) qname [])}))
@@ -201,11 +206,14 @@
 
 (defn ^:private arg-types [ast]
   ;; TODO: emit optimized fn types
-  (replicate (inc (count (:params ast))) emit/int8-ptr))
+  (cond-> (replicate (inc (count (:params ast))) emit/int8-ptr)
+    ;; add one extra arg in case of a variadic fn
+    (:variadic? ast) (cons emit/int8-ptr)))
 
 (defmethod -compile-ast :fn-method [ast ctx]
   (let [name (emit/mangle (:tag ctx) ast)]
-    {:arity (:fixed-arity ast)
+    {:arity     (:fixed-arity ast)
+     :variadic? (:variadic? ast)
      :value
      (emit/define-fun! name emit/int8-ptr (arg-types ast)
        (fn [fun builder]
@@ -215,7 +223,38 @@
               (-compile-ast (:body ast))
               :value)))}))
 
-(defmethod -compile-ast :deftype [ast ctx])
+(defn ^:private load-extensions [builder type]
+  (emit/get-field builder type 1))
+
+(defn ^:private load-extension [builder extensions id]
+  (emit/deref builder extensions [id emit/one]))
+
+(defn ^:private load-dispatch-table [builder protocol idx arity]
+  (emit/deref builder protocol [idx emit/zero arity]))
+
+(defn ^:private emit-protocol-call [builder callable protocol meth arity args]
+  (let [ptr (load-dispatch-table builder protocol meth arity)
+        args (cons callable args)
+        fun  (emit/fun-from-args builder ptr args)]
+    (emit/call builder fun args)))
+
+(defn ^:private emit-protocol-call* [ctx callable id meth arity args]
+  (let [builder (:builder ctx)]
+    (emit-protocol-call builder
+      callable
+      (load-extension builder
+        (load-extensions builder
+          (emit/get-field builder callable 0))
+        (emit/int emit/int32 id))
+      (emit/int emit/int32 meth)
+      (emit/int emit/int32 (inc arity))
+      args)))
+
+(defmethod -compile-ast :dispatch [ast ctx]
+  )
+
+(defmethod -compile-ast :deftype [ast ctx]
+  )
 
 (defmethod -compile-ast :protocol [ast ctx]
   )
@@ -249,12 +288,33 @@
   (let [op (name (:field callable))]
     (apply emit-instrinsic* op ctx (map :value args))))
 
+(defn ^:private emit-ifn-dispatch [callable-ast args ctx]
+  (let [callable (:value (-compile-ast callable-ast ctx))
+        arity    (count args)]
+    (if (< arity 8)
+      ;; callables always implement IFn as the first protocol, so we try
+      ;; a dispatch to that directly
+      (emit-protocol-call* ctx
+        (emit/bitcast (:builder ctx) callable ValueP)
+        0
+        0
+        arity
+        (map (fn [x] (emit/box (:builder ctx) (:value x))) args))
+      ;; otherwise accumulate args in last argument and call with arity 8
+      ))
+  ;; in fn:
+  ;;   implement fixed arity call directly when args < 8
+  ;;   if variadic, implement remaining arities accumulating args as list
+  )
+
 (defmethod -compile-ast :invoke [ast ctx]
   (let [callable (:fn ast)
         args     (compile-all (:args ast) ctx)]
     (cond
       (= (:class callable) 'torque.core.builtin)
-        {:value (emit-instrinsic callable args ctx)})))
+        {:value (emit-instrinsic callable args ctx)}
+      :else
+        {:value (emit-ifn-dispatch callable args ctx)})))
 
 (defmacro in-global-env [& body]
   `(env/ensure *compiler-env*

@@ -34,7 +34,7 @@
 (ffi/defimport set-insert-block! llvm LLVMPositionBuilderAtEnd :ptr [:ptr :ptr])
 (ffi/defimport dispose-builder llvm LLVMDisposeBuilder :void [:ptr])
 (ffi/defimport -return  llvm LLVMBuildRet :ptr [:ptr :ptr])
-(ffi/defimport call llvm LLVMBuildCall :ptr [:ptr :ptr :ptr :uint32 :string])
+(ffi/defimport -call llvm LLVMBuildCall :ptr [:ptr :ptr :ptr :uint32 :string])
 (ffi/defimport -add llvm LLVMBuildAdd :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport -sub llvm LLVMBuildSub :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport -mul llvm LLVMBuildMul :ptr [:ptr :ptr :ptr :string])
@@ -47,8 +47,12 @@
 (ffi/defimport alloca llvm LLVMBuildAlloca :ptr [:ptr :ptr :string])
 (ffi/defimport -store llvm LLVMBuildStore :ptr [:ptr :ptr :ptr])
 (ffi/defimport -load llvm LLVMBuildLoad :ptr [:ptr :ptr :string])
-(ffi/defimport -cast llvm LLVMBuildBitCast :ptr [:ptr :ptr :ptr :string])
+(ffi/defimport -bitcast llvm LLVMBuildBitCast :ptr [:ptr :ptr :ptr :string])
+(ffi/defimport -ptrcast llvm LLVMBuildPointerCast :ptr [:ptr :ptr :ptr :string])
+(ffi/defimport -cast llvm LLVMBuildCast :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport malloc llvm LLVMBuildMalloc :ptr [:ptr :ptr :string])
+(ffi/defimport gep llvm LLVMBuildGEP :ptr [:ptr :ptr :ptr :uint32 :string])
+(ffi/defimport igep llvm LLVMBuildInBoundsGEP :ptr [:ptr :ptr :ptr :uint32 :string])
 (ffi/defimport struct-gep llvm LLVMBuildStructGEP :ptr [:ptr :ptr :uint32 :string])
 
 ;; utilities
@@ -207,6 +211,8 @@
 
 ;; constant values
 (def nil* (value (const-null int8-ptr)))
+(def zero (value (const-int int32 0 false)))
+(def one  (value (const-int int32 1 false)))
 
 (defn bool [x]
   (if (boolean? x)
@@ -241,7 +247,7 @@
   ([val type]
    (value (const-cast (intptr val) (intptr type))))
   ([builder val type]
-   (value (-cast (intptr builder) (intptr val) (intptr type) ""))))
+   (value (-bitcast (intptr builder) (intptr val) (intptr type) ""))))
 
 (defn mangle [name fn]
   (if (:variadic? fn)
@@ -254,18 +260,49 @@
     (or (ffi/not-null (get-fun (intptr *unit*) name))
         (add-fun! (intptr *unit*) name type))))
 
+(defn fun-from-args [builder ptr args]
+  (bitcast builder
+    ptr
+    (ptr-of
+       (type (fun-type int8-ptr
+                       (util/ptrs-to-mem (map type-of args))
+                       (count args)
+                       false)))))
+
+(defn call [builder fun args]
+  (value
+    (-call (intptr builder)
+      (intptr fun)
+      (util/ptrs-to-mem args)
+      (count args)
+      "")))
+
 (defn new* [builder name args]
   (let [num    (count args)
         types  (mapv (fn [x] (type-of x)) args)
         values (mapv (fn [x] (intptr x)) args)
         ctor   (declare-fun! (str name "_new") int8-ptr types)]
     (-> (intptr builder)
-        (call ctor (util/ptrs-to-mem values) num "")
+        (-call ctor (util/ptrs-to-mem values) num "")
         (value))))
 
-(defn deref
-  ([val]
-   (const-gep (intptr val) (util/ptrs-to-mem [(int int32 0)]) 1)))
+(defn deref [builder val indices]
+  (load builder
+        (igep (intptr builder)
+              (intptr val)
+              (util/ptrs-to-mem indices)
+              (count indices)
+              "")
+        ""))
+
+(defn array-at [builder array idx]
+  (load builder
+        (gep (intptr builder)
+             (intptr array)
+             (util/ptrs-to-mem [idx])
+             1
+             "")
+        ""))
 
 (def box-type
   (type (anon-type (util/ptrs-to-mem [int8-ptr int8-ptr int64]) 3 false)))
@@ -288,6 +325,9 @@
 
 (defn allocate [builder t]
   (value (malloc (intptr builder) (intptr t) "")))
+
+(defn get-field [builder x idx]
+  (load builder (struct-gep (intptr builder) (intptr x) idx "") ""))
 
 (defn set-field [builder inst n val]
   (store builder (struct-gep (intptr builder) (intptr inst) n "") val))
