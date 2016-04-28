@@ -217,9 +217,19 @@
 
 (defmethod -compile-ast :deftype [ast ctx])
 
-(defmethod -compile-ast :protocol [ast ctx])
+(defmethod -compile-ast :protocol [ast ctx]
+  )
 
-(defmethod -compile-ast :def [ast ctx])
+(defmethod -compile-ast :def [ast ctx]
+  (let [n       (:name ast)
+        init    (some-> (:init ast) (-compile-ast ctx))
+        builder (:builder ctx)
+        global  (emit/global n (and init (emit/box builder init)))]
+    (swap! *compiler-env*
+           assoc-in
+           [:namespaces (:ns @*compiler-env*) :mapping n :handle]
+           global)
+    {:value global}))
 
 (defn ^:private emit-instrinsic*
   ([op ctx a b]
