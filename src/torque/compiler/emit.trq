@@ -20,6 +20,7 @@
 (ffi/defimport dump llvm LLVMDumpModule :void [:ptr])
 (ffi/defimport add-fun! llvm LLVMAddFunction :ptr [:ptr :string :ptr])
 (ffi/defimport get-fun llvm LLVMGetNamedFunction :ptr [:ptr :string])
+(ffi/defimport named-global llvm LLVMGetNamedGlobal :ptr [:ptr :string])
 (ffi/defimport add-global! llvm LLVMAddGlobal :ptr [:ptr :ptr :string])
 (ffi/defimport set-init! llvm LLVMSetInitializer :void [:ptr :ptr])
 
@@ -233,7 +234,7 @@
      )))
 
 (defn mutable-local [builder val name]
-  (let [local (alloca (intptr builder) (type-of val) name)]
+  (let [local (alloca (intptr builder) (intptr (type-of val)) name)]
     (-store (intptr builder) (intptr val) local)
     (value local)))
 
@@ -417,13 +418,18 @@
                             then-block
                             else-block)
         then-value (branch builder then-block cont-block then-fn)
-        else-value (branch builder else-block cont-block else-fn)]
+        ;; then block might have changed, due to a nested if
+        then-block (get-insert-block (intptr builder))
+        else-value (branch builder else-block cont-block else-fn)
+        ;; else block might have changed, due to a nested if
+        else-block (get-insert-block (intptr builder))]
     (cont builder cont-block
       [then-value else-value]
       [then-block else-block])))
 
 (defn recur* [builder point]
-  (br (intptr builder) point))
+  (br (intptr builder) point)
+  nil)
 
 (defn global
   ([name init]
@@ -432,6 +438,13 @@
    (let [g (add-global! (intptr *unit*) (intptr type) name)]
      (set-init! g (if init (intptr init) nil*))
      (value g))))
+
+(defn find-global [name]
+  (when-let [g (ffi/not-null (named-global (intptr *unit*) name))]
+    (value g)))
+
+(defn extern [name type]
+  (value (add-global! (intptr *unit*) (intptr type))))
 
 (defn array [type vals]
   (let [ptrs (util/ptrs-to-mem vals)]

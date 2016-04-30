@@ -16,6 +16,7 @@
 
 (ffi/defimport mangle llvm LLVMOrcGetMangledSymbol :void [:ptr ^:out :ptr :string])
 (ffi/defimport resolve llvm LLVMOrcGetSymbolAddress :ptr [:ptr :ptr])
+(ffi/defimport native-resolve llvm LLVMOrcGetSymbolAddress :native [:ptr :ptr])
 
 (ffi/defimport add-eager-module llvm LLVMOrcAddEagerlyCompiledIR
   :uint32 [:ptr :ptr :ptr :ptr])
@@ -99,7 +100,7 @@
   @jit)
 
 (defn register [unit]
-  ;; (print unit)
+  (print unit)
   (if (emit/unit? unit)
     (let [jit    (singleton)
           passes (emit/optimizer-passes unit)]
@@ -109,14 +110,23 @@
     ;; TODO: throw badarg
     ))
 
-(defn resolve-address
-  "Resolve a name to a memory address"
-  [symbol]
+(defn ^:private resolve-symbol
+  [symbol resolver]
   (if (named? symbol)
     (when-let [jit (singleton)]
       (let [mangled  0
             _ (mangle (intptr jit) mangled (name symbol))
-            resolved (resolve (intptr jit) mangled)]
+            resolved (resolver (intptr jit) mangled)]
         (ffi/not-null resolved)))
     ;; TODO: return error
     ))
+
+(defn resolve-address
+  "Resolve a name to a memory address"
+  [symbol]
+  (resolve-symbol symbol resolve))
+
+(defn resolve-value
+  "Resovle a clojure value from the runtime"
+  [symbol]
+  (resolve-symbol symbol native-resolve))

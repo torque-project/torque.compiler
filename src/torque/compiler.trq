@@ -24,10 +24,12 @@
 
 (def dispatch-table (emit/ptr-of dispatch-entry))
 
-(def Type   (emit/define-struct "TrqType" [emit/int32 dispatch-table]))
-(def TypeP  (emit/ptr-of Type))
-(def Value  (emit/define-struct "TrqValue" [(emit/ptr-of Type)]))
-(def ValueP (emit/ptr-of Value))
+(def Type     (emit/define-struct "TrqType" [emit/int32 dispatch-table]))
+(def TypeP    (emit/ptr-of Type))
+(def Value    (emit/define-struct "TrqValue" [(emit/ptr-of Type)]))
+(def ValueP   (emit/ptr-of Value))
+(def Protocol (emit/define-struct "Protocol" [emit/int32]))
+(def ProtoP   (emit/ptr-of Protocol))
 
 (defn fun-context [fun builder]
   {:fun fun :builder builder :env {:locals {}}})
@@ -38,10 +40,11 @@
   -compile-ast)
 
 (defn compile-all [coll ctx]
-  (mapv
-    (fn [x]
-      (-compile-ast x ctx))
-    coll))
+  (into []
+    (map
+      (fn [x]
+        (-compile-ast x ctx))
+      coll)))
 
 (defmethod -compile-ast :default [ast ctx])
 
@@ -54,6 +57,12 @@
 
 (defmethod -compile-ast :local [ast ctx]
   {:value (-> ctx :env :locals (get (:name ast)))})
+
+(defmethod -compile-ast :var [ast ctx]
+  (let [name (name (-> ast :var :name))]
+    {:value
+     (or (emit/find-global name)
+         (emit/extern name emit/int8-ptr))}))
 
 (defmethod -compile-ast :do [ast ctx]
   (loop [stmts (seq (:statements ast))]
@@ -128,10 +137,6 @@
      (compile-with-builder (:then ast) ctx)
      (compile-with-builder (:else ast) ctx))})
 
-(defn log [x]
-  (println "LOG" x)
-  x)
-
 (defn ^:private emit-protocol-meth [arities]
   (->> (reduce
         (fn [v impl]
@@ -182,7 +187,7 @@
         (emit/bitcast builder instance emit/int8-ptr)))))
 
 (defmethod -compile-ast :fn [ast ctx]
-  (let [name  (name (or (:local ast) (gensym "FN")))
+  (let [name  (name (or (:name ast) (gensym "FN")))
         qname name ;; (str (:ns @*compiler-env*) "_" name)
         meths (compile-all (:methods ast) (assoc ctx :tag qname))
         type  (emit-type qname [(emit-protocol* qname 43 meths)])
@@ -250,23 +255,95 @@
       args)))
 
 (defmethod -compile-ast :dispatch [ast ctx]
-  )
+  (let [;; protocol   (:value (-compile-ast (:protocol ast) ctx))
+        protocol   (:var (:protocol ast))
+        method     (:method ast)
+        args       (compile-all (:args ast) ctx)
+        builder    (:builder ctx)
+        self       (emit/bitcast builder (:value (first args)) ValueP)
+        type       (emit/get-field builder self 0)
+        size       (emit/get-field builder type 0)
+        extensions (load-extensions builder type)
+        idx        (emit/mutable-local builder emit/zero "nexts")]
+    {:value
+     (emit/in-block (:builder ctx) "dispatch"
+       (fn [block]
+         (emit/if* builder
+           (fn [builder]
+             (->> (emit/load builder idx "idx")
+                  (emit/cmp builder emit/gt size)))
+           (fn [builder]
+             (emit/if* builder
+               (fn [builder]
+                 (let [extension (load-extension builder extensions idx)
+                       id        (emit/get-field builder extensions 0)]
+                   (emit/cmp builder emit/eq id (emit/int emit/int32 (:id protocol)))))
+               (fn [builder]
+                 (let [extension (load-extension builder extensions idx)]
+                   (emit-protocol-call builder
+                     self
+                     extension
+                     (emit/int emit/int32 method)
+                     (emit/int emit/int32 (count args))
+                     (map :value (rest args)))))
+               (fn [builder]
+                 (emit/store builder idx
+                             (emit/add builder
+                                       (emit/load builder idx "")
+                                       emit/one))
+                 (emit/recur* builder block))))
+           (fn [builder]
+             ;; TODO: throw
+             emit/nil*))))}))
+
+(defn ^:private resolve-protocol [protocol]
+  (if (symbol? protocol)
+    ;; in the repl the analyzer won't be able to resolve a protocol,
+    ;; so we need to find it in the runtime
+    (some-> (jit/resolve-value (:name protocol)) (meta))
+    protocol))
 
 (defmethod -compile-ast :deftype [ast ctx]
-  )
+  (let [name      (name (:name ast))
+        protocols (mapv
+                    (fn [extension]
+                      (let [protocol (resolve-protocol (:protocol extension))
+                            methods  (:methods extension)]
+                        (->> (map (fn [x]
+                                    (let [meth     (first x)
+                                          tag      (str name "_" meth)
+                                          meth-ctx (assoc ctx :tag tag)]
+                                      (compile-all (get methods tag) tag)))
+                                  (:meths protocol))
+                             (emit-protocol (:name protocol) (:id protocol)))))
+                    (:extensions ast))
+        type      (emit-type name protocols)
+        fields    (replicate (count (:fields ast)) emit/int8-ptr)]
+    (emit-ctor name
+               type
+               (emit/define-struct name
+                 (cons (emit/type-of type) fields))
+               fields)
+    {:value emit/nil*}))
+
+(defmethod -compile-ast :new [ast ctx]
+  {:value
+   (emit/new* (:builder ctx)
+     (name (-> ast :class :var :name))
+     (map :value (compile-all (:args ast) ctx)))})
 
 (defmethod -compile-ast :protocol [ast ctx]
-  )
+  (let [instance (->> [(emit/int emit/int32 (:id ast))]
+                      (emit/struct Protocol)
+                      (emit/global (name (:name ast))))]
+    {:value instance}))
 
 (defmethod -compile-ast :def [ast ctx]
   (let [n       (:name ast)
-        init    (some-> (:init ast) (-compile-ast ctx))
+        init    (:value (some-> (:init ast) (-compile-ast ctx)))
         builder (:builder ctx)
-        global  (emit/global n (and init (emit/box builder init)))]
-    (swap! *compiler-env*
-           assoc-in
-           [:namespaces (:ns @*compiler-env*) :mapping n :handle]
-           global)
+        global  (emit/global (name n) emit/nil*)]
+    (emit/store builder global (and init (emit/box builder init)))
     {:value global}))
 
 (defn ^:private emit-instrinsic*
