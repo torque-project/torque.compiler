@@ -96,11 +96,12 @@
           _        (triple-target triple target 0)
           machine  (machine target triple cpu "" 0 0 1)
           resolver (ffi/fnptr resolve-symbol :ptr [:string :ptr])]
+    (print resolver)
     (reset! jit (new JIT triple machine (make-jit machine) resolver))))
   @jit)
 
 (defn register [unit]
-  (print unit)
+  ;; (print unit)
   (if (emit/unit? unit)
     (let [jit    (singleton)
           passes (emit/optimizer-passes unit)]
@@ -110,13 +111,13 @@
     ;; TODO: throw badarg
     ))
 
-(defn ^:private resolve-symbol
-  [symbol resolver]
+(defn ^:private -resolve
+  [symbol resolve-fn]
   (if (named? symbol)
     (when-let [jit (singleton)]
       (let [mangled  0
             _ (mangle (intptr jit) mangled (name symbol))
-            resolved (resolver (intptr jit) mangled)]
+            resolved (resolve-fn (intptr jit) mangled)]
         (ffi/not-null resolved)))
     ;; TODO: return error
     ))
@@ -124,9 +125,9 @@
 (defn resolve-address
   "Resolve a name to a memory address"
   [symbol]
-  (resolve-symbol symbol resolve))
+  (-resolve symbol resolve))
 
 (defn resolve-value
   "Resovle a clojure value from the runtime"
   [symbol]
-  (resolve-symbol symbol native-resolve))
+  (-resolve symbol native-resolve))

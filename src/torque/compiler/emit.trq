@@ -68,6 +68,7 @@
 (ffi/defimport const-null llvm LLVMConstNull :ptr [:ptr])
 (ffi/defimport const-int  llvm LLVMConstInt :ptr [:ptr :uint64 :bool])
 (ffi/defimport const-array llvm LLVMConstArray :ptr [:ptr :ptr :uint32])
+(ffi/defimport const-string llvm LLVMConstString :ptr [:string :uint32 :bool])
 (ffi/defimport const-struct llvm LLVMConstStruct :ptr [:ptr :uint32 :bool])
 (ffi/defimport const-typed llvm LLVMConstNamedStruct :ptr [:ptr :ptr :uint32])
 (ffi/defimport const-cast llvm LLVMConstBitCast :ptr [:ptr :ptr])
@@ -255,11 +256,14 @@
     (str name "_variadic")
     (str name "_" (:fixed-arity fn))))
 
-(defn declare-fun! [name ret args]
+(defn declare-fun! 
+ ([name ret args]
+  (declare-fun! name ret args false))
+ ([name ret args var]
   (let [ptrs (util/ptrs-to-mem args)
-        type (fun-type ret ptrs (count args) false)]
+        type (fun-type ret ptrs (count args) var)]
     (or (ffi/not-null (get-fun (intptr *unit*) name))
-        (add-fun! (intptr *unit*) name type))))
+        (add-fun! (intptr *unit*) name type)))))
 
 (defn fun-from-args [builder ptr ret args]
   (->> (fun-type ret
@@ -444,7 +448,15 @@
     (value g)))
 
 (defn extern [name type]
-  (value (add-global! (intptr *unit*) (intptr type))))
+  (value (add-global! (intptr *unit*) (intptr type) name)))
+
+(defn putc [builder ch]
+  (call builder (declare-fun! "putchar" int32 [int32]) [(int int32 ch)]))
+
+(defn log [builder s x]
+  (let [s (global ".print" (value (const-string s 4 false)))]
+    (call builder (declare-fun! "printf" int32 [int8-ptr] true) [s x])
+    x))
 
 (defn array [type vals]
   (let [ptrs (util/ptrs-to-mem vals)]

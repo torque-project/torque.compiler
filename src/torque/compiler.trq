@@ -61,8 +61,9 @@
 (defmethod -compile-ast :var [ast ctx]
   (let [name (name (-> ast :var :name))]
     {:value
-     (or (emit/find-global name)
-         (emit/extern name emit/int8-ptr))}))
+     (emit/load (:builder ctx)
+       (or (emit/find-global name)
+           (emit/extern name emit/int8-ptr)) name)}))
 
 (defmethod -compile-ast :do [ast ctx]
   (loop [stmts (seq (:statements ast))]
@@ -279,13 +280,13 @@
                        id        (emit/get-field builder extensions 0)]
                    (emit/cmp builder emit/eq id (emit/int emit/int32 (:id protocol)))))
                (fn [builder]
-                 (let [extension (load-extension builder extensions idx)]
+                 (let [extension (load-extension builder extensions (emit/load builder idx "idx"))]
                    (emit-protocol-call builder
                      self
                      extension
                      (emit/int emit/int32 method)
-                     (emit/int emit/int32 (count args))
-                     (map :value (rest args)))))
+                     (emit/int emit/int32 (inc (count args)))
+                     (map :value args))))
                (fn [builder]
                  (emit/store builder idx
                              (emit/add builder
@@ -313,7 +314,7 @@
                                     (let [meth     (first x)
                                           tag      (str name "_" meth)
                                           meth-ctx (assoc ctx :tag tag)]
-                                      (compile-all (get methods tag) tag)))
+                                      (compile-all (get methods meth) meth-ctx)))
                                   (:meths protocol))
                              (emit-protocol (:name protocol) (:id protocol)))))
                     (:extensions ast))
