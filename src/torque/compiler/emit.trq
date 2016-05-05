@@ -26,6 +26,7 @@
 
 ;; function API
 (ffi/defimport add-block! llvm LLVMAppendBasicBlock :ptr [:ptr :string])
+(ffi/defimport insert-block! llvm LLVMInsertBasicBlock :ptr [:ptr :string])
 (ffi/defimport get-arg llvm LLVMGetParam :ptr [:ptr :uint32])
 
 ;; builder API
@@ -116,6 +117,10 @@
   "The currently emitted compilation unit"
   nil)
 
+(def ^:dynamic *builder*
+  "The builder object for the currently emitted function"
+  nil)
+
 (deftype Unit [handle pass-manager]
 
   IPrintable
@@ -141,6 +146,7 @@
   `(binding [*unit* ~unit]
      ~@forms
      *unit*))
+
 (deftype Type [handle]
   IPrintable
   (-str [_]
@@ -148,6 +154,10 @@
 
   IPointerTarget
   (-intptr [_] handle)
+
+  IEquiv
+  (-equiv [_ other]
+    (== handle (. other handle)))
 
   ITyped
   (-typeof [this] this))
@@ -161,6 +171,7 @@
     (if (ffi/not-null handle)
       (util/message (pr-value handle))
       "<value: null>"))
+
   IPointerTarget
   (-intptr [_] handle)
 
@@ -188,18 +199,27 @@
      (set-insert-block! (intptr b) (intptr block))
      b)))
 
-(defn in-block [b name block-fn]
-  (let [fun   (builder-fun (get-insert-block (intptr b)))
+(defmacro with-builder [b & forms]
+  `(with-resource [b# ~b]
+     (binding [*builder* b#]
+       ~@forms
+       nil)))
+
+(defn ^:private current-fun []
+  (builder-fun (get-insert-block (intptr *builder*))))
+
+(defn in-block [name block-fn]
+  (let [fun   (current-fun)
         block (add-block! fun name)]
-    (br (intptr b) block)
-    (set-insert-block! (intptr b) block)
+    (br (intptr *builder*) block)
+    (set-insert-block! (intptr *builder*) block)
     (block-fn block)))
 
-(defmacro with-block [builder block & forms]
-  `(let [tmp# (get-insert-block (intptr ~builder))]
-     (set-insert-block! (intptr ~builder) ~block)
+(defmacro with-block [block & forms]
+  `(let [tmp# (get-insert-block (intptr *builder*))]
+     (set-insert-block! *builder* ~block)
      (let [ret# (do ~@forms)]
-       (set-insert-block! (intptr ~builder) tmp#)
+       (set-insert-block! (intptr *builder*) tmp#)
        ret#)))
 
 (defn type-of [x]
@@ -211,8 +231,37 @@
 (defn array-type [t n]
   (type (arr-type (intptr t) n)))
 
-;; constant values
-(def nil* (value (const-null int8-ptr)))
+(defn define-struct [name field-types]
+  (let [t    (named-type (global-context) name)
+        ptrs (util/ptrs-to-mem field-types)]
+    (type-body t ptrs (count field-types) false)
+    (type t)))
+
+;; basic runtime type definitions
+(def arities-table
+  "A fixed size table of function, where each function represents
+   a call arity in a protocol method."
+  (define-struct "Method" [(array-type int8-ptr 8)]))
+
+(def dispatch-entry
+  "A table of methods implemented by a single protocol, indexed by a
+   method id"
+  (define-struct "DispatchEntry"
+    [int32 (ptr-of arities-table)]))
+
+(def dispatch-table
+  "A pointer to a protocol dispatch table"
+  (ptr-of dispatch-entry))
+
+(def ValueType (define-struct "ValueType" [int32 dispatch-table]))
+(def TypeP     (ptr-of ValueType))
+(def Value     (define-struct "Value" [TypeP]))
+(def ValueP    (ptr-of Value))
+(def Protocol  (define-struct "Protocol" [int32]))
+(def ProtoP    (ptr-of Protocol))
+
+;; constant runtime values
+(def nil* (value (const-null (intptr ValueP))))
 (def zero (value (const-int int32 0 false)))
 (def one  (value (const-int int32 1 false)))
 
@@ -234,22 +283,34 @@
      ;; TODO: error
      )))
 
-(defn mutable-local [builder val name]
-  (let [local (alloca (intptr builder) (intptr (type-of val)) name)]
-    (-store (intptr builder) (intptr val) local)
+(defn extern [name type]
+  (value (add-global! (intptr *unit*) (intptr type) name)))
+
+(defn mutable-local [val name]
+  (let [local (alloca (intptr *builder*) (intptr (type-of val)) name)]
+    (-store (intptr *builder*) (intptr val) local)
     (value local)))
 
-(defn store [builder mutable val]
-  (value (-store (intptr builder) (intptr val) (intptr mutable))))
+(defn store [mutable val]
+  (value (-store (intptr *builder*) (intptr val) (intptr mutable))))
 
-(defn load [builder mutable name]
-  (value (-load (intptr builder) (intptr mutable) name)))
+(defn load [mutable name]
+  (value (-load (intptr *builder*) (intptr mutable) name)))
+
+(defn get-field [x idx]
+  (load (struct-gep (intptr *builder*) (intptr x) idx "") ""))
+
+(defn set-field [inst n val]
+  (store (struct-gep (intptr *builder*) (intptr inst) n "") val))
+
+(defn value-type [val]
+  (get-field val 0))
 
 (defn bitcast
   ([val type]
    (value (const-cast (intptr val) (intptr type))))
-  ([builder val type]
-   (value (-bitcast (intptr builder) (intptr val) (intptr type) ""))))
+  ([val type]
+   (value (-bitcast (intptr *builder*) (intptr val) (intptr type) ""))))
 
 (defn mangle [name fn]
   (if (:variadic? fn)
@@ -265,44 +326,42 @@
     (or (ffi/not-null (get-fun (intptr *unit*) name))
         (add-fun! (intptr *unit*) name type)))))
 
-(defn fun-from-args [builder ptr ret args]
+(defn fun-from-args [ptr ret args]
   (->> (fun-type ret
                  (util/ptrs-to-mem (map type-of args))
                  (count args)
                  false)
        (type)
        (ptr-of)
-       (bitcast builder ptr)))
+       (bitcast ptr)))
 
-(defn call [builder fun args]
+(defn call [fun args]
   (value
-    (-call (intptr builder)
+    (-call (intptr *builder*)
       (intptr fun)
       (util/ptrs-to-mem args)
       (count args)
       "")))
 
-(defn new* [builder name args]
+(defn new* [name args]
   (let [num    (count args)
         types  (mapv (fn [x] (type-of x)) args)
         values (mapv (fn [x] (intptr x)) args)
-        ctor   (declare-fun! (str name "_new") int8-ptr types)]
-    (-> (intptr builder)
+        ctor   (declare-fun! (str name "_new") (intptr ValueP) types)]
+    (-> (intptr *builder*)
         (-call ctor (util/ptrs-to-mem values) num "")
         (value))))
 
-(defn deref [builder val indices]
-  (load builder
-        (igep (intptr builder)
+(defn deref [val indices]
+  (load (igep (intptr *builder*)
               (intptr val)
               (util/ptrs-to-mem indices)
               (count indices)
               "")
         ""))
 
-(defn array-at [builder array idx]
-  (load builder
-        (gep (intptr builder)
+(defn array-at [array idx]
+  (load (gep (intptr *builder*)
              (intptr array)
              (util/ptrs-to-mem [idx])
              1
@@ -315,37 +374,40 @@
 (def box-ptr
   (ptr-of box-type))
 
-(defn box [builder x]
+(defn boxed? [a]
+  (let [type (extern "torque_lang_Integer" TypeP)]
+    (value
+      (-icmp (intptr *builder*)
+             eq
+             (intptr (load type "")) 
+             (intptr (value-type a))
+             ""))))
+
+(defn box [x]
   (when x
     (if (= (-> x type-of intptr kind) int-kind)
-      (new* builder "Integer" [x])
+      (new* "torque_lang_Integer" [x])
       x)))
 
-(defn unbox [builder x]
+(defn unbox [x]
   (if (= (-> x type-of intptr kind) int-kind)
     x
-    (let [box (bitcast builder x box-ptr)
-          ptr (struct-gep (intptr builder) (intptr box) 2 "")]
-      (value (-load (intptr builder) ptr "")))))
+    (let [box (bitcast x box-ptr)
+          ptr (struct-gep (intptr *builder*) (intptr box) 2 "")]
+      (value (-load (intptr *builder*) ptr "")))))
 
-(defn allocate [builder t]
-  (value (malloc (intptr builder) (intptr t) "")))
+(defn allocate [t]
+  (value (malloc (intptr *builder*) (intptr t) "")))
 
-(defn get-field [builder x idx]
-  (load builder (struct-gep (intptr builder) (intptr x) idx "") ""))
-
-(defn set-field [builder inst n val]
-  (store builder (struct-gep (intptr builder) (intptr inst) n "") val))
-
-(defn return [builder value]
-  (-return (intptr builder) (intptr (box builder value))))
+(defn return [value]
+  (-return (intptr *builder*) (intptr (box value))))
 
 (defn define-fun! [name ret args body-fn]
   (let [type  (fun-type ret (util/ptrs-to-mem args) (count args) false)
         fun   (add-fun! (intptr *unit*) name type)
         entry (value (add-block! fun "entry"))]
-    (with-resource [b (builder entry)]
-      (return b (body-fn fun b)))
+    (with-builder (builder entry)
+      (return (body-fn fun)))
     fun))
 
 (defn arg [fun n]
@@ -354,51 +416,51 @@
 (defn fn-arg [fun n]
   (arg fun (inc n)))
 
-(defn add [builder a b]
+(defn add [a b]
   ;; TODO: implement unboxing if types are known. if not,
   ;; check if we can do a dynamic dispatch
-  (value (-add (intptr builder)
-               (intptr (unbox builder a))
-               (intptr (unbox builder b))
+  (value (-add (intptr *builder*)
+               (intptr (unbox a))
+               (intptr (unbox b))
                "")))
 
-(defn sub [builder a b]
+(defn sub [a b]
   ;; TODO: implement unboxing if types are known. if not,
   ;; check if we can do a dynamic dispatch
-  (value (-sub (intptr builder) (intptr a) (intptr b) "")))
+  (value (-sub (intptr *builder*) (intptr a) (intptr b) "")))
 
-(defn mul [builder a b]
+(defn mul [a b]
   ;; TODO: implement unboxing if types are known. if not,
   ;; check if we can do a dynamic dispatch
-  (value (-mul (intptr builder) (intptr a) (intptr b) "")))
+  (value (-mul (intptr *builder*) (intptr a) (intptr b) "")))
 
-(defn div [builder a b]
+(defn div [a b]
   ;; TODO: implement unboxing if types are known. if not,
   ;; check if we can do a dynamic dispatch
-  (value (-div (intptr builder) (intptr a) (intptr b) "")))
+  (value (-div (intptr *builder*) (intptr a) (intptr b) "")))
 
-(defn cmp [builder op a b]
+(defn cmp [op a b]
   ;; TODO: implement unboxing if types are known. if not,
   ;; check if we can do a dynamic dispatch
-  (value (-icmp (intptr builder) op (intptr a) (intptr b) "")))
+  (value (-icmp (intptr *builder*) op (intptr a) (intptr b) "")))
 
-(defn ^:private not-nil? [builder x]
-  (-icmp (intptr builder) ne (intptr nil*) (intptr x) ""))
+(defn ^:private not-nil? [x]
+  (-icmp (intptr *builder*) ne (intptr nil*) (intptr x) ""))
 
-(defn ^:private truthy [builder x]
+(defn ^:private truthy [x]
   (if (= (kind (intptr (type-of x))) ptr-kind)
-    (value (not-nil? builder x))
+    (value (not-nil? x))
     x))
 
-(defn ^:private branch [builder block cont branch-fn]
-  (set-insert-block! (intptr builder) block)
-  (when-let [x (box builder (branch-fn builder))]
-    (br (intptr builder) cont)
+(defn ^:private branch [block cont branch-fn]
+  (set-insert-block! (intptr *builder*) block)
+  (when-let [x (box (branch-fn))]
+    (br (intptr *builder*) cont)
     x))
 
-(defn ^:private cont [builder block values blocks]
-  (set-insert-block! (intptr builder) block)
-  (let [phi-value (phi (intptr builder) int8-ptr "")]
+(defn ^:private cont [block values blocks]
+  (set-insert-block! (intptr *builder*) block)
+  (let [phi-value (phi (intptr *builder*) (intptr ValueP) "")]
     (loop [blocks blocks
            values values]
       (let [block (first blocks)
@@ -412,28 +474,65 @@
           (recur (next blocks) (next values)))))
     (value phi-value)))
 
-(defn if* [builder test-fn then-fn else-fn]
-  (let [fun        (builder-fun (get-insert-block (intptr builder)))
+(defn if* [test-fn then-fn else-fn]
+  (let [fun        (current-fun)
         then-block (add-block! fun "then")
         else-block (add-block! fun "else")
         cont-block (add-block! fun "cont")
-        test       (cond-br (intptr builder)
-                            (intptr (truthy builder (test-fn builder)))
+        test       (cond-br (intptr *builder*)
+                            (intptr (truthy (test-fn)))
                             then-block
                             else-block)
-        then-value (branch builder then-block cont-block then-fn)
+        then-value (branch then-block cont-block then-fn)
         ;; then block might have changed, due to a nested if
-        then-block (get-insert-block (intptr builder))
-        else-value (branch builder else-block cont-block else-fn)
+        then-block (get-insert-block (intptr *builder*))
+        else-value (branch else-block cont-block else-fn)
         ;; else block might have changed, due to a nested if
-        else-block (get-insert-block (intptr builder))]
-    (cont builder cont-block
+        else-block (get-insert-block (intptr *builder*))]
+    (cont cont-block
       [then-value else-value]
       [then-block else-block])))
 
-(defn recur* [builder point]
-  (br (intptr builder) point)
+(defn recur* [point]
+  (br (intptr *builder*) point)
   nil)
+
+(defn short-and
+  "Builds a short circuit and construct out of a lit of
+   builder functions"
+  [& fs]
+  (let [fun    (current-fun)
+        out    (add-block! fun "")
+        blocks (repeatedly
+                 (count fs)
+                 (fn [] (insert-block! out "")))
+        values (mapv
+                 (fn [f block]
+                   (set-insert-block! (intptr *builder*) block)
+                   (let [v (truthy (f))]
+                     (cond-br (intptr *builder*) (intptr v) block out)))
+                 fs blocks)]
+    (cont out values blocks)))
+
+(defn ^:private value-identical [a b]
+  (if*
+    (fn []
+      (short-and (partial boxed? a) (partial boxed? b)))
+    (fn []
+      (cmp eq (unbox a) (unbox b)))
+    (fn []
+      (cmp eq a b))))
+
+(defn identical [a b]
+  (if (= (type-of a) (type-of b))
+    (let [k (kind (intptr (type-of a)))]
+      (cond
+        (== k int-kind) (cmp eq a b)
+        (== k ptr-kind) (value-identical a b)
+        :else (int int1 0)))
+    (identical (box a) (box b))))
+
+(defn satisfies [p x])
 
 (defn global
   ([name init]
@@ -447,30 +546,20 @@
   (when-let [g (ffi/not-null (named-global (intptr *unit*) name))]
     (value g)))
 
-(defn extern [name type]
-  (value (add-global! (intptr *unit*) (intptr type) name)))
+(defn putc [ch]
+  (call (declare-fun! "putchar" int32 [int32]) [(int int32 ch)]))
 
-(defn putc [builder ch]
-  (call builder (declare-fun! "putchar" int32 [int32]) [(int int32 ch)]))
-
-(defn log [builder s x]
+(defn log [s x]
   (let [s (global ".print" (value (const-string s 4 false)))]
-    (call builder (declare-fun! "printf" int32 [int8-ptr] true) [s x])
+    (call (declare-fun! "printf" int32 [int8-ptr] true) [s x])
     x))
 
 (defn array [type vals]
   (let [ptrs (util/ptrs-to-mem vals)]
     (value (const-array (intptr type) ptrs (count vals)))))
 
-(defn define-struct [name field-types]
-  (let [t    (named-type (global-context) name)
-        ptrs (util/ptrs-to-mem field-types)]
-    (type-body t ptrs (count field-types) false)
-    (type t)))
-
 (defn struct
   ([fields]
    (value (const-struct (util/ptrs-to-mem fields) (count fields) false)))
   ([t fields]
    (value (const-typed (intptr t) (util/ptrs-to-mem fields) (count fields)))))
-

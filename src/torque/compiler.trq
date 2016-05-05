@@ -15,24 +15,8 @@
   sapce compiled so far"
   (atom (a/empty-env)))
 
-(def arities-table
-  (emit/define-struct "Method" [(emit/array-type emit/int8-ptr 8)]))
-
-(def dispatch-entry
-  (emit/define-struct "DispatchEntry"
-    [emit/int32 (emit/ptr-of arities-table)]))
-
-(def dispatch-table (emit/ptr-of dispatch-entry))
-
-(def Type     (emit/define-struct "TrqType" [emit/int32 dispatch-table]))
-(def TypeP    (emit/ptr-of Type))
-(def Value    (emit/define-struct "TrqValue" [(emit/ptr-of Type)]))
-(def ValueP   (emit/ptr-of Value))
-(def Protocol (emit/define-struct "Protocol" [emit/int32]))
-(def ProtoP   (emit/ptr-of Protocol))
-
-(defn fun-context [fun builder]
-  {:fun fun :builder builder :env {:locals {}}})
+(defn fun-context [fun]
+  {:fun fun :env {:locals {}}})
 
 (defmulti -compile-ast (fn [ast ctx] (:op ast)))
 
@@ -56,12 +40,17 @@
      (= (:type ast) :number) (emit/int (:val ast)))})
 
 (defmethod -compile-ast :local [ast ctx]
-  {:value (-> ctx :env :locals (get (:name ast)))})
+  {:value
+   (cond
+     (= (:local ast) :field)
+       (emit/get-field (emit/arg (:fun ctx) 0) (inc (:field-id ast)))
+     :else
+       (-> ctx :env :locals (get (:name ast))))})
 
 (defmethod -compile-ast :var [ast ctx]
   (let [name (name (-> ast :var :name))]
     {:value
-     (emit/load (:builder ctx)
+     (emit/load
        (or (emit/find-global name)
            (emit/extern name emit/int8-ptr)) name)}))
 
@@ -85,58 +74,55 @@
 
 (defn ^:private emit-loop-storage [ast ctx]
   (mapv
-   (fn [binding]
+    (fn [binding]
       (let [init  (-compile-ast (:init binding) ctx)
             label (name (:name binding))]
-        (emit/mutable-local (:builder ctx) (:value init) label)))
+        (emit/mutable-local (:value init) label)))
     (:bindings ast)))
 
-(defn ^:private load-loop-bindings [builder bindings mutables]
+(defn ^:private load-loop-bindings [bindings mutables]
   (->> (map (fn [binding mutable]
               (let [n (:name binding)]
-                [n {:value (emit/load builder mutable (name n))}]))
+                [n {:value (emit/load mutable (name n))}]))
             bindings
             mutables)
        (into {})))
 
 (defn ^:private emit-loop-ctx [ast mutables block ctx]
-  (let [loads  (load-loop-bindings (:builder ctx) (:bindings ast) mutables)
+  (let [loads  (load-loop-bindings (:bindings ast) mutables)
         locals (update-in ctx [:env :locals] merge loads)]
     (merge locals
            {:recur-point block
             :recur-bindings mutables})))
 
 (defmethod -compile-ast :loop [ast ctx]
-  (let [builder  (:builder ctx)
-        bindings (emit-loop-storage ast ctx)
+  (let [bindings (emit-loop-storage ast ctx)
         label    (name (:loop-id ast))]
-    (emit/in-block builder label
+    (emit/in-block label
       (fn [block]
         (->> (emit-loop-ctx ast bindings block ctx)
              (-compile-ast (:body ast)))))))
 
 (defmethod -compile-ast :recur [ast ctx]
-  (let [builder (:builder ctx)]
-    (loop [bindings (:recur-bindings ctx)
-           values   (compile-all (:exprs ast) ctx)]
-      (let [binding (first bindings)
-            value   (first values)]
-        (when (and binding value)
-          (emit/store builder binding (:value value))
-          (recur (next bindings) (next values)))))
-    (emit/recur* builder (:recur-point ctx))
-    nil))
+  (loop [bindings (:recur-bindings ctx)
+         values   (compile-all (:exprs ast) ctx)]
+    (let [binding (first bindings)
+          value   (first values)]
+      (when (and binding value)
+        (emit/store binding (:value value))
+        (recur (next bindings) (next values)))))
+  (emit/recur* (:recur-point ctx))
+  nil)
 
-(defn ^:private compile-with-builder [ast ctx]
-  (fn [builder]
-    (:value (-compile-ast ast (assoc ctx :builder builder)))))
+(defn ^:private compiler [ast ctx]
+  (fn [] (:value (-compile-ast ast ctx))))
 
 (defmethod -compile-ast :if [ast ctx]
   {:value
-   (emit/if* (:builder ctx)
-     (compile-with-builder (:test ast) ctx)
-     (compile-with-builder (:then ast) ctx)
-     (compile-with-builder (:else ast) ctx))})
+   (emit/if*
+     (compiler (:test ast) ctx)
+     (compiler (:then ast) ctx)
+     (compiler (:else ast) ctx))})
 
 (defn ^:private emit-protocol-meth [arities]
   (->> (reduce
@@ -146,7 +132,7 @@
         arities)
        (emit/array emit/int8-ptr)
        (vector)
-       (emit/struct arities-table)))
+       (emit/struct emit/arities-table)))
 
 (defn swizzle-cast [type val]
   (emit/bitcast val type))
@@ -156,11 +142,11 @@
        (mapv
         (fn [impl]
           (emit-protocol-meth impl)))
-       (emit/array arities-table)
+       (emit/array emit/arities-table)
        (emit/global (str name "_methods"))
-       (swizzle-cast (emit/ptr-of arities-table))
+       (swizzle-cast (emit/ptr-of emit/arities-table))
        (vector (emit/int emit/int32 id))
-       (emit/struct dispatch-entry)))
+       (emit/struct emit/dispatch-entry)))
 
 (defn ^:private emit-protocol* [name id & impls]
   (emit-protocol name id impls))
@@ -170,31 +156,34 @@
         table-size     (emit/int emit/int32 (count protocols))
         protocol-table (emit/bitcast
                          (emit/global (str name "_entries")
-                           (emit/array dispatch-entry protocols))
-                         dispatch-table)]
-    (->> (emit/struct Type [table-size protocol-table])
-         (emit/global type-name Type))))
+                           (emit/array emit/dispatch-entry protocols))
+                         emit/dispatch-table)]
+    (->> (emit/struct emit/Type [table-size protocol-table])
+         (emit/global type-name emit/Type))))
 
 (defn ^:private emit-ctor [name type instance-struct field-types]
   (emit/define-fun! (str name "_new") emit/int8-ptr field-types
-    (fn [fun builder]
-      (let [instance (emit/allocate builder instance-struct)]
-        (emit/set-field builder instance 0 type)
+    (fn [fun]
+      (let [instance (emit/allocate instance-struct)]
+        (emit/set-field instance 0 type)
         (loop [n     0
                types field-types]
-          (when-let [type (first field-types)]
-            (emit/set-field builder instance (inc n) (emit/arg fun n))
-            (recur (inc n) (next field-types))))
-        (emit/bitcast builder instance emit/int8-ptr)))))
+          (when-let [field-type (first types)]
+            (emit/set-field instance (inc n) (emit/arg fun n))
+            (recur (inc n) (next types))))
+        (emit/bitcast instance emit/int8-ptr)))))
+
+(defn ^:private call-frame [ctx tag frame-type]
+  (merge ctx {:tag tag :frame frame-type}))
 
 (defmethod -compile-ast :fn [ast ctx]
-  (let [name  (name (or (:name ast) (gensym "FN")))
+  (let [name  (name (or (:name ast) (gensym "fn")))
         qname name ;; (str (:ns @*compiler-env*) "_" name)
-        meths (compile-all (:methods ast) (assoc ctx :tag qname))
-        type  (emit-type qname [(emit-protocol* qname 43 meths)])
-        inst  (emit/define-struct qname [(emit/type-of type)])]
+        inst  (emit/define-struct qname [emit/TypeP])
+        meths (compile-all (:methods ast) (call-frame ctx qname inst))
+        type  (emit-type qname [(emit-protocol* qname 43 meths)])]
     (emit-ctor qname type inst [])
-    {:value (emit/new* (:builder ctx) qname [])}))
+    {:value (emit/new* qname [])}))
 
 (defn ^:private emit-params [ast ctx]
   (reduce
@@ -206,12 +195,10 @@
     ctx
     (:params ast)))
 
-(defn ^:private emit-closed-overs [ast ctx]
-  ctx)
-
-(defn ^:private arg-types [ast]
+(defn ^:private arg-types [ast ctx]
   ;; TODO: emit optimized fn types
-  (cond-> (replicate (inc (count (:params ast))) emit/int8-ptr)
+  (cond-> (cons (emit/ptr-of (:frame ctx))
+                (replicate (count (:params ast)) emit/int8-ptr))
     ;; add one extra arg in case of a variadic fn
     (:variadic? ast) (cons emit/int8-ptr)))
 
@@ -220,80 +207,72 @@
     {:arity     (:fixed-arity ast)
      :variadic? (:variadic? ast)
      :value
-     (emit/define-fun! name emit/int8-ptr (arg-types ast)
-       (fn [fun builder]
-         (->> (fun-context fun builder)
-              (emit-closed-overs ast)
+     (emit/define-fun! name emit/int8-ptr (arg-types ast ctx)
+       (fn [fun]
+         (->> (fun-context fun)
               (emit-params ast)
               (-compile-ast (:body ast))
               :value)))}))
 
-(defn ^:private load-extensions [builder type]
-  (emit/get-field builder type 1))
+(defn ^:private load-extensions [type]
+  (emit/get-field type 1))
 
-(defn ^:private load-extension [builder extensions id]
-  (emit/deref builder extensions [id emit/one]))
+(defn ^:private load-extension [extensions id]
+  (emit/deref extensions [id emit/one]))
 
-(defn ^:private load-dispatch-table [builder protocol idx arity]
-  (emit/deref builder protocol [idx emit/zero arity]))
+(defn ^:private load-dispatch-table [protocol idx arity]
+  (emit/deref protocol [idx emit/zero arity]))
 
-(defn ^:private emit-protocol-call [builder callable protocol meth arity args]
-  (let [ptr (load-dispatch-table builder protocol meth arity)
+(defn ^:private emit-protocol-call [callable protocol meth arity args]
+  (let [ptr (load-dispatch-table protocol meth arity)
         args (cons callable args)
-        fun  (emit/fun-from-args builder ptr emit/int8-ptr args)]
-    (emit/call builder fun args)))
+        fun  (emit/fun-from-args ptr emit/int8-ptr args)]
+    (emit/call fun args)))
 
 (defn ^:private emit-protocol-call* [ctx callable id meth arity args]
-  (let [builder (:builder ctx)]
-    (emit-protocol-call builder
-      callable
-      (load-extension builder
-        (load-extensions builder
-          (emit/get-field builder callable 0))
-        (emit/int emit/int32 id))
-      (emit/int emit/int32 meth)
-      (emit/int emit/int32 (inc arity))
-      args)))
+  (emit-protocol-call callable
+    (load-extension
+      (load-extensions (emit/get-field callable 0))
+      (emit/int emit/int32 id))
+    (emit/int emit/int32 meth)
+    (emit/int emit/int32 (inc arity))
+    args))
 
 (defmethod -compile-ast :dispatch [ast ctx]
   (let [;; protocol   (:value (-compile-ast (:protocol ast) ctx))
         protocol   (:var (:protocol ast))
         method     (:method ast)
         args       (compile-all (:args ast) ctx)
-        builder    (:builder ctx)
-        self       (emit/bitcast builder (:value (first args)) ValueP)
-        type       (emit/get-field builder self 0)
-        size       (emit/get-field builder type 0)
-        extensions (load-extensions builder type)
-        idx        (emit/mutable-local builder emit/zero "nexts")]
+        self       (emit/bitcast (:value (first args)) emit/ValueP)
+        type       (emit/get-field self 0)
+        size       (emit/get-field type 0)
+        extensions (load-extensions type)
+        idx        (emit/mutable-local emit/zero "nexts")]
     {:value
-     (emit/in-block (:builder ctx) "dispatch"
+     (emit/in-block "dispatch"
        (fn [block]
-         (emit/if* builder
-           (fn [builder]
-             (->> (emit/load builder idx "idx")
-                  (emit/cmp builder emit/gt size)))
-           (fn [builder]
-             (emit/if* builder
-               (fn [builder]
-                 (let [extension (load-extension builder extensions idx)
-                       id        (emit/get-field builder extensions 0)]
-                   (emit/cmp builder emit/eq id (emit/int emit/int32 (:id protocol)))))
-               (fn [builder]
-                 (let [extension (load-extension builder extensions (emit/load builder idx "idx"))]
-                   (emit-protocol-call builder
+         (emit/if* 
+           (fn []
+             (->> (emit/load idx "idx")
+                  (emit/cmp emit/gt size)))
+           (fn []
+             (emit/if* 
+               (fn []
+                 (let [extension (load-extension extensions idx)
+                       id        (emit/get-field extensions 0)]
+                   (emit/cmp emit/eq id (emit/int emit/int32 (:id protocol)))))
+               (fn []
+                 (let [extension (load-extension extensions (emit/load idx "idx"))]
+                   (emit-protocol-call 
                      self
                      extension
                      (emit/int emit/int32 method)
                      (emit/int emit/int32 (inc (count args)))
                      (map :value args))))
-               (fn [builder]
-                 (emit/store builder idx
-                             (emit/add builder
-                                       (emit/load builder idx "")
-                                       emit/one))
-                 (emit/recur* builder block))))
-           (fn [builder]
+               (fn []
+                 (emit/store idx (emit/add (emit/load idx "") emit/one))
+                 (emit/recur* block))))
+           (fn []
              ;; TODO: throw
              emit/nil*))))}))
 
@@ -304,62 +283,80 @@
     (some-> (jit/resolve-value (:name protocol)) (meta))
     protocol))
 
+(defn ^:private compile-methods [methods extensions ctx]
+  (map
+    (fn [x]
+      (let [meth     (first x)
+            tag      (str name "_" meth)
+            meth-ctx (assoc ctx :tag tag)]
+        (compile-all (get methods meth) meth-ctx)))
+    methods))
+
+(defn ^:private compile-extensions [extensions ctx]
+  (mapv
+    (fn [extension]
+      (let [protocol (resolve-protocol (:protocol extension))
+            methods  (:methods extension)]
+        (->> (compile-methods methods (:meths protocol ctx))
+             (emit-protocol (:name protocol) (:id protocol)))))
+    extensions))
+
 (defmethod -compile-ast :deftype [ast ctx]
   (let [name      (name (:name ast))
-        protocols (mapv
-                    (fn [extension]
-                      (let [protocol (resolve-protocol (:protocol extension))
-                            methods  (:methods extension)]
-                        (->> (map (fn [x]
-                                    (let [meth     (first x)
-                                          tag      (str name "_" meth)
-                                          meth-ctx (assoc ctx :tag tag)]
-                                      (compile-all (get methods meth) meth-ctx)))
-                                  (:meths protocol))
-                             (emit-protocol (:name protocol) (:id protocol)))))
-                    (:extensions ast))
-        type      (emit-type name protocols)
-        fields    (replicate (count (:fields ast)) emit/int8-ptr)]
-    (emit-ctor name
-               type
-               (emit/define-struct name
-                 (cons (emit/type-of type) fields))
-               fields)
+        fields    (replicate (count (:fields ast)) (emit/type emit/int8-ptr))
+        inst      (emit/define-struct name (vec (cons emit/TypeP fields)))
+        meth-ctx  (assoc ctx :frame inst)
+        protocols (compile-extensions (:extensions ast) meth-ctx)
+        type      (emit-type name protocols)]
+    (emit-ctor name type inst fields)
     {:value emit/nil*}))
 
 (defmethod -compile-ast :new [ast ctx]
   {:value
-   (emit/new* (:builder ctx)
+   (emit/new*
      (name (-> ast :class :var :name))
      (map :value (compile-all (:args ast) ctx)))})
 
 (defmethod -compile-ast :protocol [ast ctx]
   (let [instance (->> [(emit/int emit/int32 (:id ast))]
-                      (emit/struct Protocol)
+                      (emit/struct emit/Protocol)
                       (emit/global (name (:name ast))))]
     {:value instance}))
 
 (defmethod -compile-ast :def [ast ctx]
   (let [n       (:name ast)
         init    (:value (some-> (:init ast) (-compile-ast ctx)))
-        builder (:builder ctx)
         global  (emit/global (name n) emit/nil*)]
-    (emit/store builder global (and init (emit/box builder init)))
+    (emit/store global (and init (emit/box init)))
     {:value global}))
 
 (defn ^:private emit-instrinsic*
+  ([op ctx x]
+   (cond
+     (= op "integer?") nil
+     (= op "binary?")  emit/nil*
+     (= op "array?")   emit/nil*
+     (= op "type")     nil))
   ([op ctx a b]
    (cond
-     (= op "+")  (emit/add (:builder ctx) a b)
-     (= op "-")  (emit/sub (:builder ctx) a b)
-     (= op "*")  (emit/mul (:builder ctx) a b)
-     (= op "/")  (emit/div (:builder ctx) a b)
-     (= op "<")  (emit/cmp (:builder ctx) emit/lt a b)
-     (= op "<=") (emit/cmp (:builder ctx) emit/le a b)
-     (= op "==") (emit/cmp (:builder ctx) emit/eq a b)
-     (= op "!=") (emit/cmp (:builder ctx) emit/ne a b)
-     (= op ">")  (emit/cmp (:builder ctx) emit/gt a b)
-     (= op ">=") (emit/cmp (:builder ctx) emit/ge a b))))
+     ;; intrinsic operators
+     (= op "+")  (emit/add a b)
+     (= op "-")  (emit/sub a b)
+     (= op "*")  (emit/mul a b)
+     (= op "/")  (emit/div a b)
+     (= op "<")  (emit/cmp emit/lt a b)
+     (= op "<=") (emit/cmp emit/le a b)
+     (= op "==") (emit/cmp emit/eq a b)
+     (= op "!=") (emit/cmp emit/ne a b)
+     (= op ">")  (emit/cmp emit/gt a b)
+     (= op ">=") (emit/cmp emit/ge a b)
+     ;; (= op "+")  (emit/band (:builder ctx) a b)
+     ;; (= op "-")  (emit/bor  (:builder ctx) a b)
+     ;; (= op "*")  (emit/bsl  (:builder ctx) a b)
+     ;; (= op "/")  (emit/bsr  (:builder ctx) a b)
+     ;; builtin functions
+     (= op "identical?") (emit/identical a b)
+     (= op "satisfies?") nil)))
 
 (defn ^:private emit-instrinsic [callable args ctx]
   (let [op (name (:field callable))]
@@ -372,11 +369,11 @@
       ;; callables always implement IFn as the first protocol, so we try
       ;; a dispatch to that directly
       (emit-protocol-call* ctx
-        (emit/bitcast (:builder ctx) callable ValueP)
+        (emit/bitcast callable emit/ValueP)
         0
         0
         arity
-        (map (fn [x] (emit/box (:builder ctx) (:value x))) args))
+        (map (fn [x] (emit/box (:value x))) args))
       ;; TODO: otherwise accumulate args in last argument and call with arity 8
       ))
   ;; in fn:
@@ -384,14 +381,17 @@
   ;;   if variadic, implement remaining arities accumulating args as list
   )
 
+(defn ^:private builtin? [x]
+  (= (:class x) 'torque.core.builtin))
+
 (defmethod -compile-ast :invoke [ast ctx]
   (let [callable (:fn ast)
         args     (compile-all (:args ast) ctx)]
-    (cond
-      (= (:class callable) 'torque.core.builtin)
-        {:value (emit-instrinsic callable args ctx)}
-      :else
-        {:value (emit-ifn-dispatch callable args ctx)})))
+    {:value
+     (cond
+       (builtin? callable) (emit-instrinsic callable args ctx)
+       ;; TODO: optimize call if it is known to be a fn
+       :else               (emit-ifn-dispatch callable args ctx))}))
 
 (defmacro in-global-env [& body]
   `(env/ensure *compiler-env*
@@ -403,8 +403,8 @@
         unit (emit/unit name)]
     (emit/with-unit unit
       (emit/define-fun! name emit/int8-ptr []
-        (fn [f b]
-          (-> (compile-ast ast (fun-context f b))
+        (fn [f]
+          (-> (compile-ast ast (fun-context f))
               (:value)))))
     (jit/register unit)
     (when-let [addr (jit/resolve-address name)]
