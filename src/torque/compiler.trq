@@ -52,7 +52,7 @@
     {:value
      (emit/load
        (or (emit/find-global name)
-           (emit/extern name emit/int8-ptr)) name)}))
+           (emit/extern name emit/ValueP)) name)}))
 
 (defmethod -compile-ast :do [ast ctx]
   (loop [stmts (seq (:statements ast))]
@@ -158,8 +158,8 @@
                          (emit/global (str name "_entries")
                            (emit/array emit/dispatch-entry protocols))
                          emit/dispatch-table)]
-    (->> (emit/struct emit/Type [table-size protocol-table])
-         (emit/global type-name emit/Type))))
+    (->> (emit/struct emit/ValueType [table-size protocol-table])
+         (emit/global type-name emit/ValueType))))
 
 (defn ^:private emit-ctor [name type instance-struct field-types]
   (emit/define-fun! (str name "_new") emit/int8-ptr field-types
@@ -224,7 +224,7 @@
   (emit/deref protocol [idx emit/zero arity]))
 
 (defn ^:private emit-protocol-call [callable protocol meth arity args]
-  (let [ptr (load-dispatch-table protocol meth arity)
+  (let [ptr  (load-dispatch-table protocol meth arity)
         args (cons callable args)
         fun  (emit/fun-from-args ptr emit/int8-ptr args)]
     (emit/call fun args)))
@@ -238,6 +238,34 @@
     (emit/int emit/int32 (inc arity))
     args))
 
+(defn find-protocol [type protocol]
+  (let [extensions (load-extensions type)
+        size       (emit/get-field type 0)
+        idx        (emit/mutable-local emit/zero "nexts")]
+    (emit/in-block "dispatch"
+      (fn [block]
+        (emit/if* emit/methods
+          (fn []
+            (->> (emit/load idx "idx") (emit/cmp emit/gt size)))
+          (fn []
+            (emit/if* emit/methods
+              (fn []
+                (let [extension (load-extension extensions idx)
+                      id        (emit/get-field extensions 0)]
+                  (emit/cmp emit/eq id protocol)))
+              (fn []
+                (load-extension extensions (emit/load idx "idx")))
+              (fn []
+                (emit/store idx (emit/add (emit/load idx "") emit/one))
+                (emit/recur* block))))
+          (fn []
+            emit/not-implemented))))))
+
+(defn satisfies [protocol x]
+  (emit/cmp emit/ne
+    (find-protocol (emit/get-field x 0) (emit/get-field protocol 0))
+    emit/not-implemented))
+
 (defmethod -compile-ast :dispatch [ast ctx]
   (let [;; protocol   (:value (-compile-ast (:protocol ast) ctx))
         protocol   (:var (:protocol ast))
@@ -245,36 +273,14 @@
         args       (compile-all (:args ast) ctx)
         self       (emit/bitcast (:value (first args)) emit/ValueP)
         type       (emit/get-field self 0)
-        size       (emit/get-field type 0)
-        extensions (load-extensions type)
-        idx        (emit/mutable-local emit/zero "nexts")]
+        extension  (find-protocol type (emit/int emit/int32 (:id protocol)))]
     {:value
-     (emit/in-block "dispatch"
-       (fn [block]
-         (emit/if* 
-           (fn []
-             (->> (emit/load idx "idx")
-                  (emit/cmp emit/gt size)))
-           (fn []
-             (emit/if* 
-               (fn []
-                 (let [extension (load-extension extensions idx)
-                       id        (emit/get-field extensions 0)]
-                   (emit/cmp emit/eq id (emit/int emit/int32 (:id protocol)))))
-               (fn []
-                 (let [extension (load-extension extensions (emit/load idx "idx"))]
-                   (emit-protocol-call 
-                     self
-                     extension
-                     (emit/int emit/int32 method)
-                     (emit/int emit/int32 (inc (count args)))
-                     (map :value args))))
-               (fn []
-                 (emit/store idx (emit/add (emit/load idx "") emit/one))
-                 (emit/recur* block))))
-           (fn []
-             ;; TODO: throw
-             emit/nil*))))}))
+      (emit-protocol-call
+         self
+         extension
+         (emit/int emit/int32 method)
+         (emit/int emit/int32 (inc (count args)))
+         (map :value args))}))
 
 (defn ^:private resolve-protocol [protocol]
   (if (symbol? protocol)
@@ -283,7 +289,7 @@
     (some-> (jit/resolve-value (:name protocol)) (meta))
     protocol))
 
-(defn ^:private compile-methods [methods extensions ctx]
+(defn ^:private compile-methods [name methods extensions ctx]
   (map
     (fn [x]
       (let [meth     (first x)
@@ -292,12 +298,12 @@
         (compile-all (get methods meth) meth-ctx)))
     methods))
 
-(defn ^:private compile-extensions [extensions ctx]
+(defn ^:private compile-extensions [name extensions ctx]
   (mapv
     (fn [extension]
       (let [protocol (resolve-protocol (:protocol extension))
             methods  (:methods extension)]
-        (->> (compile-methods methods (:meths protocol ctx))
+        (->> (compile-methods name methods (:meths protocol ctx) ctx)
              (emit-protocol (:name protocol) (:id protocol)))))
     extensions))
 
@@ -306,7 +312,7 @@
         fields    (replicate (count (:fields ast)) (emit/type emit/int8-ptr))
         inst      (emit/define-struct name (vec (cons emit/TypeP fields)))
         meth-ctx  (assoc ctx :frame inst)
-        protocols (compile-extensions (:extensions ast) meth-ctx)
+        protocols (compile-extensions name (:extensions ast) meth-ctx)
         type      (emit-type name protocols)]
     (emit-ctor name type inst fields)
     {:value emit/nil*}))
@@ -356,7 +362,7 @@
      ;; (= op "/")  (emit/bsr  (:builder ctx) a b)
      ;; builtin functions
      (= op "identical?") (emit/identical a b)
-     (= op "satisfies?") nil)))
+     (= op "satisfies?") (satisfies a b))))
 
 (defn ^:private emit-instrinsic [callable args ctx]
   (let [op (name (:field callable))]

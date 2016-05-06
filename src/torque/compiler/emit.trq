@@ -243,11 +243,13 @@
    a call arity in a protocol method."
   (define-struct "Method" [(array-type int8-ptr 8)]))
 
+(def methods
+  (ptr-of arities-table))
+
 (def dispatch-entry
   "A table of methods implemented by a single protocol, indexed by a
    method id"
-  (define-struct "DispatchEntry"
-    [int32 (ptr-of arities-table)]))
+  (define-struct "DispatchEntry" [int32 methods]))
 
 (def dispatch-table
   "A pointer to a protocol dispatch table"
@@ -264,6 +266,12 @@
 (def nil* (value (const-null (intptr ValueP))))
 (def zero (value (const-int int32 0 false)))
 (def one  (value (const-int int32 1 false)))
+
+(defn null [t]
+  (value (const-null (intptr t))))
+
+(def not-implemented
+  (null methods))
 
 (defn bool [x]
   (if (boolean? x)
@@ -440,6 +448,7 @@
   (value (-div (intptr *builder*) (intptr a) (intptr b) "")))
 
 (defn cmp [op a b]
+  (println op a b)
   ;; TODO: implement unboxing if types are known. if not,
   ;; check if we can do a dynamic dispatch
   (value (-icmp (intptr *builder*) op (intptr a) (intptr b) "")))
@@ -458,9 +467,9 @@
     (br (intptr *builder*) cont)
     x))
 
-(defn ^:private cont [block values blocks]
+(defn ^:private cont [type block values blocks]
   (set-insert-block! (intptr *builder*) block)
-  (let [phi-value (phi (intptr *builder*) (intptr ValueP) "")]
+  (let [phi-value (phi (intptr *builder*) (intptr type) "")]
     (loop [blocks blocks
            values values]
       (let [block (first blocks)
@@ -474,31 +483,34 @@
           (recur (next blocks) (next values)))))
     (value phi-value)))
 
-(defn if* [test-fn then-fn else-fn]
-  (let [fun        (current-fun)
-        then-block (add-block! fun "then")
-        else-block (add-block! fun "else")
-        cont-block (add-block! fun "cont")
-        test       (cond-br (intptr *builder*)
-                            (intptr (truthy (test-fn)))
-                            then-block
-                            else-block)
-        then-value (branch then-block cont-block then-fn)
-        ;; then block might have changed, due to a nested if
-        then-block (get-insert-block (intptr *builder*))
-        else-value (branch else-block cont-block else-fn)
-        ;; else block might have changed, due to a nested if
-        else-block (get-insert-block (intptr *builder*))]
-    (cont cont-block
-      [then-value else-value]
-      [then-block else-block])))
+(defn if*
+  ([test-fn then-fn else-fn]
+   (if* ValueP test-fn then-fn else-fn))
+  ([type test-fn then-fn else-fn]
+   (let [fun        (current-fun)
+         then-block (add-block! fun "then")
+         else-block (add-block! fun "else")
+         cont-block (add-block! fun "cont")
+         test       (cond-br (intptr *builder*)
+                             (intptr (truthy (test-fn)))
+                             then-block
+                             else-block)
+         then-value (branch then-block cont-block then-fn)
+         ;; then block might have changed, due to a nested if
+         then-block (get-insert-block (intptr *builder*))
+         else-value (branch else-block cont-block else-fn)
+         ;; else block might have changed, due to a nested if
+         else-block (get-insert-block (intptr *builder*))]
+     (cont type cont-block
+           [then-value else-value]
+           [then-block else-block]))))
 
 (defn recur* [point]
   (br (intptr *builder*) point)
   nil)
 
 (defn short-and
-  "Builds a short circuit and construct out of a lit of
+  "Builds a short circuit logical and construct out of a list of
    builder functions"
   [& fs]
   (let [fun    (current-fun)
@@ -512,7 +524,7 @@
                    (let [v (truthy (f))]
                      (cond-br (intptr *builder*) (intptr v) block out)))
                  fs blocks)]
-    (cont out values blocks)))
+    (cont int1 out values blocks)))
 
 (defn ^:private value-identical [a b]
   (if*
@@ -531,8 +543,6 @@
         (== k ptr-kind) (value-identical a b)
         :else (int int1 0)))
     (identical (box a) (box b))))
-
-(defn satisfies [p x])
 
 (defn global
   ([name init]
