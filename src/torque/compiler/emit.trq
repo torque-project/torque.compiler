@@ -295,8 +295,13 @@
      ;; TODO: error
      )))
 
+(defn find-global [name]
+  (when-let [g (ffi/not-null (named-global (intptr *unit*) name))]
+    (value g)))
+
 (defn extern [name type]
-  (value (add-global! (intptr *unit*) (intptr type) name)))
+  (or (find-global name)
+      (value (add-global! (intptr *unit*) (intptr type) name))))
 
 (defn mutable-local [val name]
   (let [local (alloca (intptr *builder*) (intptr (type-of val)) name)]
@@ -472,7 +477,6 @@
   (value (-lshr (intptr *builder*) (intptr a) (intptr b) "")))
 
 (defn cmp [op a b]
-  (println op a b)
   ;; TODO: implement unboxing if types are known. if not,
   ;; check if we can do a dynamic dispatch
   (value (-icmp (intptr *builder*) op (intptr a) (intptr b) "")))
@@ -568,6 +572,11 @@
         :else (int int1 0)))
     (identical (box a) (box b))))
 
+(defn integer? [x]
+  (or (== (kind (intptr (type-of x))) int-kind)
+      (-> (value-type x)
+          (identical (extern "torque_lang_Integer")))))
+
 (defn global
   ([name init]
    (global name (type-of init) init))
@@ -575,10 +584,6 @@
    (let [g (add-global! (intptr *unit*) (intptr type) name)]
      (set-init! g (if init (intptr init) nil*))
      (value g))))
-
-(defn find-global [name]
-  (when-let [g (ffi/not-null (named-global (intptr *unit*) name))]
-    (value g)))
 
 (defn putc [ch]
   (call (declare-fun! "putchar" int32 [int32]) [(int int32 ch)]))

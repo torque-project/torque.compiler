@@ -49,10 +49,7 @@
 
 (defmethod -compile-ast :var [ast ctx]
   (let [name (name (-> ast :var :name))]
-    {:value
-     (emit/load
-       (or (emit/find-global name)
-           (emit/extern name emit/ValueP)) name)}))
+    {:value (emit/load (emit/extern name emit/ValueP) name)}))
 
 (defmethod -compile-ast :do [ast ctx]
   (loop [stmts (seq (:statements ast))]
@@ -339,10 +336,10 @@
 (defn ^:private emit-instrinsic*
   ([op ctx x]
    (cond
-     (= op "integer?") nil
+     (= op "integer?") (emit/integer? x)
      (= op "binary?")  emit/nil*
      (= op "array?")   emit/nil*
-     (= op "type")     nil))
+     (= op "type")     (emit/value-type (emit/box x) 0)))
   ([op ctx a b]
    (cond
      ;; operator intrinsics
@@ -404,7 +401,6 @@
      ~@body))
 
 (defn eval-ast [ast]
-  ;; (print ast)
   (let [name (name (gensym "eval"))
         unit (emit/unit name)]
     (emit/with-unit unit
@@ -422,12 +418,12 @@
     (in-global-env
       (-> form trq/analyze eval-ast))))
 
-;; (defn compile-ns [ns]
-;;   (binding [trq/*resolver* (r/project-resolver (fs/cwd))
-;;             trq/*eval*     eval]
-;;     (in-global-env (trq/load-ns ns))
-;;     (when-let [ast (get-in @*compiler-env* [:namespaces ns])]
-;;       ;; TODO: here we would trigger a second compiler pass
-;;       ;; that optimizes the code and emits an object file
-;;       ;; (compile-ast ast (empty-context))
-;;       nil)))
+(defn compile-ns [ns]
+  (binding [trq/*resolver* (r/project-resolver (fs/cwd))
+            trq/*eval*     eval-ast]
+    (in-global-env (trq/load-ns ns))
+    (when-let [ast (get-in @*compiler-env* [:namespaces ns])]
+      ;; TODO: here we would trigger a second compiler pass
+      ;; that optimizes the code and emits an object file
+      ;; (compile-ast ast (empty-context))
+      nil)))

@@ -96,7 +96,6 @@
           _        (triple-target triple target 0)
           machine  (machine target triple cpu "" 0 0 1)
           resolver (ffi/fnptr resolve-symbol :ptr [:string :ptr])]
-    (print resolver)
     (reset! jit (new JIT triple machine (make-jit machine) resolver))))
   @jit)
 
