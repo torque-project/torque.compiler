@@ -41,6 +41,10 @@
 (ffi/defimport -sub llvm LLVMBuildSub :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport -mul llvm LLVMBuildMul :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport -div llvm LLVMBuildSDiv :ptr [:ptr :ptr :ptr :string])
+(ffi/defimport -bit-and llvm LLVMBuildAnd :ptr [:ptr :ptr :ptr :string])
+(ffi/defimport -bit-or llvm LLVMBuildOr :ptr [:ptr :ptr :ptr :string])
+(ffi/defimport -shl llvm LLVMBuildShl :ptr [:ptr :ptr :ptr :string])
+(ffi/defimport -lshr llvm LLVMBuildLShr :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport -icmp llvm LLVMBuildICmp :ptr [:ptr :uint32 :ptr :ptr :string])
 (ffi/defimport br llvm LLVMBuildBr :void [:ptr :ptr])
 (ffi/defimport cond-br llvm LLVMBuildCondBr :ptr [:ptr :ptr :ptr :ptr])
@@ -446,6 +450,26 @@
   ;; TODO: implement unboxing if types are known. if not,
   ;; check if we can do a dynamic dispatch
   (value (-div (intptr *builder*) (intptr a) (intptr b) "")))
+
+(defn bit-and [a b]
+  ;; TODO: implement unboxing if types are known. if not,
+  ;; check if we can do a dynamic dispatch
+  (value (-bit-and (intptr *builder*) (intptr a) (intptr b) "")))
+
+(defn bit-or [a b]
+  ;; TODO: implement unboxing if types are known. if not,
+  ;; check if we can do a dynamic dispatch
+  (value (-bit-or (intptr *builder*) (intptr a) (intptr b) "")))
+
+(defn bsl [a b]
+  ;; TODO: implement unboxing if types are known. if not,
+  ;; check if we can do a dynamic dispatch
+  (value (-shl (intptr *builder*) (intptr a) (intptr b) "")))
+
+(defn bsr [a b]
+  ;; TODO: implement unboxing if types are known. if not,
+  ;; check if we can do a dynamic dispatch
+  (value (-lshr (intptr *builder*) (intptr a) (intptr b) "")))
 
 (defn cmp [op a b]
   (println op a b)
