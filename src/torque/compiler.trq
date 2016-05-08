@@ -195,7 +195,7 @@
 (defn ^:private arg-types [ast ctx]
   ;; TODO: emit optimized fn types
   (cond-> (cons (emit/ptr-of (:frame ctx))
-                (replicate (count (:params ast)) emit/int8-ptr))
+                (replicate (count (:params ast)) emit/ValueP))
     ;; add one extra arg in case of a variadic fn
     (:variadic? ast) (cons emit/int8-ptr)))
 
@@ -339,7 +339,7 @@
      (= op "integer?") (emit/integer? x)
      (= op "binary?")  emit/nil*
      (= op "array?")   emit/nil*
-     (= op "type")     (emit/value-type (emit/box x) 0)))
+     (= op "type")     (emit/value-type (emit/box x))))
   ([op ctx a b]
    (cond
      ;; operator intrinsics

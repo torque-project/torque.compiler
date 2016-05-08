@@ -516,11 +516,12 @@
    (if* ValueP test-fn then-fn else-fn))
   ([type test-fn then-fn else-fn]
    (let [fun        (current-fun)
+         test       (truthy (test-fn))
          then-block (add-block! fun "then")
          else-block (add-block! fun "else")
          cont-block (add-block! fun "cont")
          test       (cond-br (intptr *builder*)
-                             (intptr (truthy (test-fn)))
+                             (intptr test)
                              then-block
                              else-block)
          then-value (branch then-block cont-block then-fn)
@@ -543,14 +544,13 @@
   [& fs]
   (let [fun    (current-fun)
         out    (add-block! fun "")
-        blocks (repeatedly
-                 (count fs)
-                 (fn [] (insert-block! out "")))
+        blocks (repeatedly (count fs) (fn [] (insert-block! out "")))
         values (mapv
                  (fn [f block]
                    (set-insert-block! (intptr *builder*) block)
                    (let [v (truthy (f))]
-                     (cond-br (intptr *builder*) (intptr v) block out)))
+                     (cond-br (intptr *builder*) (intptr v) block out)
+                     v))
                  fs blocks)]
     (cont int1 out values blocks)))
 
