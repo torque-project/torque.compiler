@@ -612,9 +612,7 @@
   (extern name ValueType))
 
 (defn instance-of [type x]
-  (let [out (cmp eq type (value-type x))]
-    (print *unit*)
-    out))
+  (cmp eq type (value-type x)))
 
 (defn integer? [x]
   (or (== (kind (intptr (type-of x))) int-kind)

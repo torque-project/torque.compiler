@@ -254,19 +254,19 @@
 (defn ^:private compile-extensions [name extensions ctx]
   (mapv
     (fn [extension]
-      (let [protocol (resolve-protocol (:protocol extension))
+      (let [protocol (resolve-protocol (:var (:protocol extension)))
             methods  (:methods extension)]
         (->> (compile-methods name methods (:meths protocol ctx) ctx)
              (gen/protocol (:name protocol) (:id protocol)))))
     extensions))
 
 (defmethod -compile-ast :deftype [ast ctx]
-  (let [name      (name (:name ast))
-        fields    (replicate (count (:fields ast)) (emit/type emit/int8-ptr))
-        type      (gen/type name fields
-                    (fn [type]
-                      (->> (assoc ctx :frame type)
-                           (compile-extensions name (:extensions ast)))))]
+  (let [name   (name (:name ast))
+        fields (replicate (count (:fields ast)) (emit/type emit/int8-ptr))
+        type   (gen/type name fields
+                 (fn [type]
+                   (->> (assoc ctx :frame type)
+                        (compile-extensions name (:extensions ast)))))]
     {:value emit/nil*}))
 
 (defmethod -compile-ast :new [ast ctx]
