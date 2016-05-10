@@ -1,0 +1,44 @@
+(ns torque.compiler.runtime
+  (:require
+    [torque.compiler.emit :as emit]
+    [torque.compiler.generators :as gen]))
+
+(def printable    0)
+(def ifn          43)
+(def serializable 45)
+(def pointer      46)
+
+(def binary-type-name "torque_lang_Binary")
+
+(defn binary []
+  (emit/import-type binary-type-name))
+
+(defn binary-type []
+  (emit/find-type binary-type-name))
+
+(defn ^:private emit-binary-type []
+  ;; TODO: implement protocol methods
+  (gen/type binary-type-name [emit/int64 emit/int8-ptr]
+    (fn [_]
+      [])))
+
+(defn ^:private binary-ctor []
+  (emit/declare-ctor! binary-type-name [emit/int64 emit/int8-ptr]))
+
+(defn make-binary [size]
+  (let [ctor      (binary-ctor)
+        type-size (emit/sizeof (binary-type))
+        ptr       (emit/allocate (emit/add type-size size))]
+    (emit/call ctor [ptr size (emit/advance-ptr ptr size)])))
+
+(defn bget [b idx]
+  (-> (emit/bitcast b (emit/ptr-of (binary-type)))
+      (emit/get-field 2)
+      (emit/buffer-at idx)))
+
+(defn blength [b]
+  (emit/get-field (emit/bitcast b (emit/ptr-of (binary-type))) 1))
+
+(defn rt0 []
+  (emit/with-unit (emit/unit "__torque_rt0")
+    (emit-binary-type)))

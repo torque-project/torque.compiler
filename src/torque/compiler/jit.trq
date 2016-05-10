@@ -1,6 +1,8 @@
 (ns torque.compiler.jit
   (:require
     [torque.compiler.emit :as emit]
+    [torque.compiler.generators :as gen]
+    [torque.compiler.runtime :as rt] 
     [torque.compiler.util :as util]
     [torque.ffi :as ffi]
     [torque.string :as str]))
@@ -15,8 +17,8 @@
 (ffi/defimport free-jit llvm LLVMOrcDisposeInstance :void [:ptr])
 
 (ffi/defimport mangle llvm LLVMOrcGetMangledSymbol :void [:ptr ^:out :ptr :string])
-(ffi/defimport resolve llvm LLVMOrcGetSymbolAddress :ptr [:ptr :ptr])
-(ffi/defimport native-resolve llvm LLVMOrcGetSymbolAddress :native [:ptr :ptr])
+(ffi/defimport resolve llvm LLVMOrcGetSymbolAddress :ptr [:ptr :string])
+(ffi/defimport native-resolve llvm LLVMOrcGetSymbolAddress :native [:ptr :string])
 
 (ffi/defimport add-eager-module llvm LLVMOrcAddEagerlyCompiledIR
   :uint32 [:ptr :ptr :ptr :ptr])
@@ -88,6 +90,8 @@
         addr (dls host name)]
     addr))
 
+(declare register)
+
 (defn singleton []
   (when (nil? @jit)
     (boot)
@@ -96,7 +100,8 @@
           _        (triple-target triple target 0)
           machine  (machine target triple cpu "" 0 0 1)
           resolver (ffi/fnptr resolve-symbol :ptr [:string :ptr])]
-    (reset! jit (new JIT triple machine (make-jit machine) resolver))))
+      (reset! jit (new JIT triple machine (make-jit machine) resolver))
+      (register (rt/rt0))))
   @jit)
 
 (defn register [unit]
@@ -106,7 +111,7 @@
           passes (emit/optimizer-passes unit)]
       (add-machine-passes (. jit machine) passes)
       (emit/init-passes passes)
-      (add-lazy-module (stack jit) (intptr unit) (resolver jit) 0))
+      (add-eager-module (stack jit) (intptr unit) (resolver jit) 0))
     ;; TODO: throw badarg
     ))
 
@@ -114,9 +119,7 @@
   [symbol resolve-fn]
   (if (named? symbol)
     (when-let [jit (singleton)]
-      (let [mangled  0
-            _ (mangle (intptr jit) mangled (name symbol))
-            resolved (resolve-fn (intptr jit) mangled)]
+      (let [resolved (resolve-fn (intptr jit) symbol)]
         (ffi/not-null resolved)))
     ;; TODO: return error
     ))

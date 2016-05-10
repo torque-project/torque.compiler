@@ -8,6 +8,8 @@
     [torque.analyzer.resolver :as r]
     [torque.compiler.jit  :as jit]
     [torque.compiler.emit :as emit]
+    [torque.compiler.generators :as gen]
+    [torque.compiler.runtime :as rt]
     [torque.io.fs :as fs]))
 
 (def ^:dynamic *compiler-env*
@@ -121,65 +123,18 @@
      (compiler (:then ast) ctx)
      (compiler (:else ast) ctx))})
 
-(defn ^:private emit-protocol-meth [arities]
-  (->> (reduce
-        (fn [v impl]
-          (assoc v (inc (:arity impl)) (emit/bitcast (:value impl) emit/int8-ptr)))
-        (vec (replicate 8 emit/nil*))
-        arities)
-       (emit/array emit/int8-ptr)
-       (vector)
-       (emit/struct emit/arities-table)))
-
-(defn swizzle-cast [type val]
-  (emit/bitcast val type))
-
-(defn ^:private emit-protocol [name id impls]
-  (->> impls
-       (mapv
-        (fn [impl]
-          (emit-protocol-meth impl)))
-       (emit/array emit/arities-table)
-       (emit/global (str name "_methods"))
-       (swizzle-cast (emit/ptr-of emit/arities-table))
-       (vector (emit/int emit/int32 id))
-       (emit/struct emit/dispatch-entry)))
-
-(defn ^:private emit-protocol* [name id & impls]
-  (emit-protocol name id impls))
-
-(defn ^:private emit-type [name protocols]
-  (let [type-name      (str name "_type")
-        table-size     (emit/int emit/int32 (count protocols))
-        protocol-table (emit/bitcast
-                         (emit/global (str name "_entries")
-                           (emit/array emit/dispatch-entry protocols))
-                         emit/dispatch-table)]
-    (->> (emit/struct emit/ValueType [table-size protocol-table])
-         (emit/global type-name emit/ValueType))))
-
-(defn ^:private emit-ctor [name type instance-struct field-types]
-  (emit/define-fun! (str name "_new") emit/int8-ptr field-types
-    (fn [fun]
-      (let [instance (emit/allocate instance-struct)]
-        (emit/set-field instance 0 type)
-        (loop [n     0
-               types field-types]
-          (when-let [field-type (first types)]
-            (emit/set-field instance (inc n) (emit/arg fun n))
-            (recur (inc n) (next types))))
-        (emit/bitcast instance emit/int8-ptr)))))
-
 (defn ^:private call-frame [ctx tag frame-type]
   (merge ctx {:tag tag :frame frame-type}))
 
 (defmethod -compile-ast :fn [ast ctx]
   (let [name  (name (or (:name ast) (gensym "fn")))
         qname name ;; (str (:ns @*compiler-env*) "_" name)
-        inst  (emit/define-struct qname [emit/TypeP])
-        meths (compile-all (:methods ast) (call-frame ctx qname inst))
-        type  (emit-type qname [(emit-protocol* qname 43 meths)])]
-    (emit-ctor qname type inst [])
+        type  (gen/type qname []
+                (fn [type]
+                  (->> (call-frame ctx qname type)
+                       (compile-all (:methods ast))
+                       (gen/protocol* qname rt/ifn)
+                       (list))))]
     {:value (emit/new* qname [])}))
 
 (defn ^:private emit-params [ast ctx]
@@ -204,7 +159,7 @@
     {:arity     (:fixed-arity ast)
      :variadic? (:variadic? ast)
      :value
-     (emit/define-fun! name emit/int8-ptr (arg-types ast ctx)
+     (emit/define-fun! name emit/ValueP (arg-types ast ctx)
        (fn [fun]
          (->> (fun-context fun)
               (emit-params ast)
@@ -223,7 +178,7 @@
 (defn ^:private emit-protocol-call [callable protocol meth arity args]
   (let [ptr  (load-dispatch-table protocol meth arity)
         args (cons callable args)
-        fun  (emit/fun-from-args ptr emit/int8-ptr args)]
+        fun  (emit/fun-from-args ptr emit/ValueP args)]
     (emit/call fun args)))
 
 (defn ^:private emit-protocol-call* [ctx callable id meth arity args]
@@ -253,19 +208,20 @@
               (fn []
                 (load-extension extensions (emit/load idx "idx")))
               (fn []
-                (emit/store idx (emit/add (emit/load idx "") emit/one))
+                (emit/store idx (emit/add (emit/load idx "id") emit/one))
                 (emit/recur* block))))
           (fn []
             emit/not-implemented))))))
 
 (defn satisfies [protocol x]
-  (emit/cmp emit/ne
-    (find-protocol (emit/get-field x 0) (emit/get-field protocol 0))
-    emit/not-implemented))
+  (let [protocol (emit/bitcast protocol emit/ProtoP)]
+    (emit/cmp emit/ne
+      (find-protocol (emit/get-field x 0) (emit/get-field protocol 1))
+      emit/not-implemented)))
 
 (defmethod -compile-ast :dispatch [ast ctx]
   (let [;; protocol   (:value (-compile-ast (:protocol ast) ctx))
-        protocol   (:var (:protocol ast))
+        protocol   (:var (:var (:protocol ast)))
         method     (:method ast)
         args       (compile-all (:args ast) ctx)
         self       (emit/bitcast (:value (first args)) emit/ValueP)
@@ -301,17 +257,16 @@
       (let [protocol (resolve-protocol (:protocol extension))
             methods  (:methods extension)]
         (->> (compile-methods name methods (:meths protocol ctx) ctx)
-             (emit-protocol (:name protocol) (:id protocol)))))
+             (gen/protocol (:name protocol) (:id protocol)))))
     extensions))
 
 (defmethod -compile-ast :deftype [ast ctx]
   (let [name      (name (:name ast))
         fields    (replicate (count (:fields ast)) (emit/type emit/int8-ptr))
-        inst      (emit/define-struct name (vec (cons emit/TypeP fields)))
-        meth-ctx  (assoc ctx :frame inst)
-        protocols (compile-extensions name (:extensions ast) meth-ctx)
-        type      (emit-type name protocols)]
-    (emit-ctor name type inst fields)
+        type      (gen/type name fields
+                    (fn [type]
+                      (->> (assoc ctx :frame type)
+                           (compile-extensions name (:extensions ast)))))]
     {:value emit/nil*}))
 
 (defmethod -compile-ast :new [ast ctx]
@@ -321,25 +276,29 @@
      (map :value (compile-all (:args ast) ctx)))})
 
 (defmethod -compile-ast :protocol [ast ctx]
-  (let [instance (->> [(emit/int emit/int32 (:id ast))]
+  (let [name     (str (name (:name ast)) "_protocol")
+        instance (->> [(emit/null emit/TypeP) (emit/int emit/int32 (:id ast))]
                       (emit/struct emit/Protocol)
-                      (emit/global (name (:name ast))))]
-    {:value instance}))
+                      (emit/global name))]
+    {:value (emit/bitcast instance emit/ValueP)}))
 
 (defmethod -compile-ast :def [ast ctx]
-  (let [n       (:name ast)
-        init    (:value (some-> (:init ast) (-compile-ast ctx)))
-        global  (emit/global (name n) emit/nil*)]
-    (emit/store global (and init (emit/box init)))
-    {:value global}))
+  (let [n     (:name ast)
+        init  (:init ast)
+        value (some-> init (-compile-ast ctx))
+        global (emit/global (name n) emit/nil*)]
+    (emit/store global (and value (emit/box (:value value))))
+    (or value {:value emit/nil*})))
 
 (defn ^:private emit-instrinsic*
   ([op ctx x]
    (cond
-     (= op "integer?") (emit/integer? x)
-     (= op "binary?")  emit/nil*
-     (= op "array?")   emit/nil*
-     (= op "type")     (emit/value-type (emit/box x))))
+     ;; (= op "integer?")    (emit/integer? x)
+     (= op "binary?")     (emit/instance-of (rt/binary) x)
+     (= op "array?")      emit/nil*
+     (= op "type")        (emit/value-type (emit/box x))
+     (= op "make-binary") (rt/make-binary (emit/unbox x))
+     (= op "blength")     (rt/blength x)))
   ([op ctx a b]
    (cond
      ;; operator intrinsics
@@ -347,19 +306,20 @@
      (= op "-")   (emit/sub a b)
      (= op "*")   (emit/mul a b)
      (= op "/")   (emit/div a b)
-     (= op "<")   (emit/cmp emit/lt a b)
-     (= op "<=")  (emit/cmp emit/le a b)
-     (= op "==")  (emit/cmp emit/eq a b)
-     (= op "!=")  (emit/cmp emit/ne a b)
-     (= op ">")   (emit/cmp emit/gt a b)
-     (= op ">=")  (emit/cmp emit/ge a b)
+     (= op "<")   (emit/cmp emit/lt (emit/unbox a) (emit/unbox b))
+     (= op "<=")  (emit/cmp emit/le (emit/unbox a) (emit/unbox b))
+     (= op "==")  (emit/cmp emit/eq (emit/unbox a) (emit/unbox b))
+     (= op "!=")  (emit/cmp emit/ne (emit/unbox a) (emit/unbox b))
+     (= op ">")   (emit/cmp emit/gt (emit/unbox a) (emit/unbox b))
+     (= op ">=")  (emit/cmp emit/ge (emit/unbox a) (emit/unbox b))
      (= op "&")   (emit/bit-and a b)
      (= op "|")   (emit/bit-or a b)
      (= op "bsl") (emit/bsl a b)
      (= op "bsr") (emit/bsr a b)
      ;; builtin functions
      (= op "identical?") (emit/identical a b)
-     (= op "satisfies?") (satisfies a b))))
+     (= op "satisfies?") (satisfies a b)
+     (= op "bget")       (rt/bget a (emit/unbox b)))))
 
 (defn ^:private emit-instrinsic [callable args ctx]
   (let [op (name (:field callable))]
@@ -404,7 +364,7 @@
   (let [name (name (gensym "eval"))
         unit (emit/unit name)]
     (emit/with-unit unit
-      (emit/define-fun! name emit/int8-ptr []
+      (emit/define-fun! name emit/ValueP []
         (fn [f]
           (-> (compile-ast ast (fun-context f))
               (:value)))))

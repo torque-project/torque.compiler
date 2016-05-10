@@ -56,12 +56,13 @@
 (ffi/defimport -bitcast llvm LLVMBuildBitCast :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport -ptrcast llvm LLVMBuildPointerCast :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport -cast llvm LLVMBuildCast :ptr [:ptr :ptr :ptr :string])
-(ffi/defimport malloc llvm LLVMBuildMalloc :ptr [:ptr :ptr :string])
-(ffi/defimport gep llvm LLVMBuildGEP :ptr [:ptr :ptr :ptr :uint32 :string])
-(ffi/defimport igep llvm LLVMBuildInBoundsGEP :ptr [:ptr :ptr :ptr :uint32 :string])
+;; (ffi/defimport malloc llvm LLVMBuildMalloc :ptr [:ptr :ptr :string])
+(ffi/defimport -gep llvm LLVMBuildGEP :ptr [:ptr :ptr :ptr :uint32 :string])
+(ffi/defimport -igep llvm LLVMBuildInBoundsGEP :ptr [:ptr :ptr :ptr :uint32 :string])
 (ffi/defimport struct-gep llvm LLVMBuildStructGEP :ptr [:ptr :ptr :uint32 :string])
 
 ;; utilities
+(ffi/defimport -find-type llvm LLVMGetTypeByName :ptr [:ptr :string])
 (ffi/defimport get-type llvm LLVMTypeOf :ptr [:ptr])
 (ffi/defimport kind   llvm LLVMGetTypeKind :uint32 [:ptr])
 
@@ -78,6 +79,7 @@
 (ffi/defimport const-typed llvm LLVMConstNamedStruct :ptr [:ptr :ptr :uint32])
 (ffi/defimport const-cast llvm LLVMConstBitCast :ptr [:ptr :ptr])
 (ffi/defimport const-gep llvm LLVMConstInBoundsGEP :ptr [:ptr :ptr :uint32])
+(ffi/defimport -sizeof llvm LLVMSizeOf :ptr [:ptr])
 
 ;; type constructors
 (ffi/defimport named-type llvm LLVMStructCreateNamed :ptr [:ptr :string])
@@ -263,7 +265,7 @@
 (def TypeP     (ptr-of ValueType))
 (def Value     (define-struct "Value" [TypeP]))
 (def ValueP    (ptr-of Value))
-(def Protocol  (define-struct "Protocol" [int32]))
+(def Protocol  (define-struct "Protocol" [TypeP int32]))
 (def ProtoP    (ptr-of Protocol))
 
 ;; constant runtime values
@@ -294,6 +296,9 @@
      (value (const-int t x true))
      ;; TODO: error
      )))
+
+(defn find-type [name]
+  (type (-find-type (intptr *unit*) name)))
 
 (defn find-global [name]
   (when-let [g (ffi/not-null (named-global (intptr *unit*) name))]
@@ -334,17 +339,23 @@
     (str name "_variadic")
     (str name "_" (:fixed-arity fn))))
 
-(defn declare-fun! 
+(defn declare-fun!
  ([name ret args]
   (declare-fun! name ret args false))
  ([name ret args var]
   (let [ptrs (util/ptrs-to-mem args)
-        type (fun-type ret ptrs (count args) var)]
+        type (fun-type (intptr ret) ptrs (count args) var)]
     (or (ffi/not-null (get-fun (intptr *unit*) name))
         (add-fun! (intptr *unit*) name type)))))
 
+(defn declare-ctor! [name fields]
+  (declare-fun!
+    (str name "_new")
+    (intptr ValueP)
+    (cons int8-ptr fields)))
+
 (defn fun-from-args [ptr ret args]
-  (->> (fun-type ret
+  (->> (fun-type (intptr ret)
                  (util/ptrs-to-mem (map type-of args))
                  (count args)
                  false)
@@ -360,30 +371,23 @@
       (count args)
       "")))
 
-(defn new* [name args]
-  (let [num    (count args)
-        types  (mapv (fn [x] (type-of x)) args)
-        values (mapv (fn [x] (intptr x)) args)
-        ctor   (declare-fun! (str name "_new") (intptr ValueP) types)]
-    (-> (intptr *builder*)
-        (-call ctor (util/ptrs-to-mem values) num "")
-        (value))))
-
 (defn deref [val indices]
-  (load (igep (intptr *builder*)
-              (intptr val)
-              (util/ptrs-to-mem indices)
-              (count indices)
-              "")
+  (load (-igep (intptr *builder*)
+               (intptr val)
+               (util/ptrs-to-mem indices)
+               (count indices)
+               "")
         ""))
 
-(defn array-at [array idx]
-  (load (gep (intptr *builder*)
-             (intptr array)
-             (util/ptrs-to-mem [idx])
-             1
-             "")
+(defn advance-ptr [ptr off]
+  (-gep (intptr *builder*)
+        (intptr ptr)
+        (util/ptrs-to-mem [off])
+        1
         ""))
+
+(defn buffer-at [buffer idx]
+  (load (advance-ptr buffer idx) ""))
 
 (def box-type
   (type (anon-type (util/ptrs-to-mem [int8-ptr int8-ptr int64]) 3 false)))
@@ -400,12 +404,6 @@
              (intptr (value-type a))
              ""))))
 
-(defn box [x]
-  (when x
-    (if (= (-> x type-of intptr kind) int-kind)
-      (new* "torque_lang_Integer" [x])
-      x)))
-
 (defn unbox [x]
   (if (= (-> x type-of intptr kind) int-kind)
     x
@@ -413,14 +411,41 @@
           ptr (struct-gep (intptr *builder*) (intptr box) 2 "")]
       (value (-load (intptr *builder*) ptr "")))))
 
-(defn allocate [t]
-  (value (malloc (intptr *builder*) (intptr t) "")))
+(defn sizeof [t]
+  (value (-sizeof (intptr t))))
+
+(defn malloc [size]
+  (-> (declare-fun! "malloc" int8-ptr [int64])
+      (call [size])))
+
+(defn allocate [size]
+  (malloc size))
+
+(defn new*
+  ([name args]
+   (new* name (find-type name) args))
+  ([name type args]
+   (let [num    (count args)
+         types  (cons int8-ptr (mapv (fn [x] (type-of x)) args))
+         mem    (allocate (sizeof type))
+         values (cons (intptr mem) (mapv (fn [x] (intptr x)) args))
+         ctor   (declare-fun! (str name "_new") (intptr ValueP) types)]
+     (-> (intptr *builder*)
+         (-call ctor (util/ptrs-to-mem values) (inc num) "")
+         (value)))))
+
+(defn box [x]
+  (when x
+    (if (= (-> x type-of intptr kind) int-kind)
+      (-> (declare-fun! "torque_lang_Integer_new" ValueP [int64])
+          (call [x]))
+      x)))
 
 (defn return [value]
   (-return (intptr *builder*) (intptr (box value))))
 
 (defn define-fun! [name ret args body-fn]
-  (let [type  (fun-type ret (util/ptrs-to-mem args) (count args) false)
+  (let [type  (fun-type (intptr ret) (util/ptrs-to-mem args) (count args) false)
         fun   (add-fun! (intptr *unit*) name type)
         entry (value (add-block! fun "entry"))]
     (with-builder (builder entry)
@@ -434,51 +459,54 @@
   (arg fun (inc n)))
 
 (defn add [a b]
-  ;; TODO: implement unboxing if types are known. if not,
-  ;; check if we can do a dynamic dispatch
   (value (-add (intptr *builder*)
                (intptr (unbox a))
                (intptr (unbox b))
                "")))
 
 (defn sub [a b]
-  ;; TODO: implement unboxing if types are known. if not,
-  ;; check if we can do a dynamic dispatch
-  (value (-sub (intptr *builder*) (intptr a) (intptr b) "")))
+  (value (-sub (intptr *builder*)
+               (intptr (unbox a))
+               (intptr (unbox b))
+               "")))
 
 (defn mul [a b]
-  ;; TODO: implement unboxing if types are known. if not,
-  ;; check if we can do a dynamic dispatch
-  (value (-mul (intptr *builder*) (intptr a) (intptr b) "")))
+  (value (-mul (intptr *builder*)
+               (intptr (unbox a))
+               (intptr (unbox b))
+               "")))
 
 (defn div [a b]
-  ;; TODO: implement unboxing if types are known. if not,
-  ;; check if we can do a dynamic dispatch
-  (value (-div (intptr *builder*) (intptr a) (intptr b) "")))
+  (value (-div (intptr *builder*)
+               (intptr (unbox a))
+               (intptr (unbox b))
+               "")))
 
 (defn bit-and [a b]
-  ;; TODO: implement unboxing if types are known. if not,
-  ;; check if we can do a dynamic dispatch
-  (value (-bit-and (intptr *builder*) (intptr a) (intptr b) "")))
+  (value (-bit-and (intptr *builder*)
+                   (intptr (unbox a))
+                   (intptr (unbox b))
+                   "")))
 
 (defn bit-or [a b]
-  ;; TODO: implement unboxing if types are known. if not,
-  ;; check if we can do a dynamic dispatch
-  (value (-bit-or (intptr *builder*) (intptr a) (intptr b) "")))
+  (value (-bit-or (intptr *builder*)
+                  (intptr (unbox a))
+                  (intptr (unbox b))
+                  "")))
 
 (defn bsl [a b]
-  ;; TODO: implement unboxing if types are known. if not,
-  ;; check if we can do a dynamic dispatch
-  (value (-shl (intptr *builder*) (intptr a) (intptr b) "")))
+  (value (-shl (intptr *builder*)
+               (intptr (unbox a))
+               (intptr (unbox b))
+               "")))
 
 (defn bsr [a b]
-  ;; TODO: implement unboxing if types are known. if not,
-  ;; check if we can do a dynamic dispatch
-  (value (-lshr (intptr *builder*) (intptr a) (intptr b) "")))
+  (value (-lshr (intptr *builder*)
+                (intptr (unbox a))
+                (intptr (unbox b))
+                "")))
 
 (defn cmp [op a b]
-  ;; TODO: implement unboxing if types are known. if not,
-  ;; check if we can do a dynamic dispatch
   (value (-icmp (intptr *builder*) op (intptr a) (intptr b) "")))
 
 (defn ^:private not-nil? [x]
@@ -543,15 +571,23 @@
    builder functions"
   [& fs]
   (let [fun    (current-fun)
+        intro  (get-insert-block (intptr *builder*))
         out    (add-block! fun "")
-        blocks (repeatedly (count fs) (fn [] (insert-block! out "")))
+        blocks (cons intro
+                     (repeatedly (dec (count fs))
+                                 (fn [] (insert-block! out ""))))
         values (mapv
-                 (fn [f block]
-                   (set-insert-block! (intptr *builder*) block)
+                 (fn [f blocks]
+                   (set-insert-block! (intptr *builder*) (first blocks))
                    (let [v (truthy (f))]
-                     (cond-br (intptr *builder*) (intptr v) block out)
+                     (if (== out (second blocks))
+                       (br (intptr *builder*) out)
+                       (cond-br (intptr *builder*)
+                                (intptr v)
+                                (second blocks)
+                                out))
                      v))
-                 fs blocks)]
+                 fs (partition 2 1 [out] blocks))]
     (cont int1 out values blocks)))
 
 (defn ^:private value-identical [a b]
@@ -572,10 +608,18 @@
         :else (int int1 0)))
     (identical (box a) (box b))))
 
+(defn import-type [name]
+  (extern name ValueType))
+
+(defn instance-of [type x]
+  (let [out (cmp eq type (value-type x))]
+    (print *unit*)
+    out))
+
 (defn integer? [x]
   (or (== (kind (intptr (type-of x))) int-kind)
       (-> (value-type x)
-          (identical (extern "torque_lang_Integer")))))
+          (identical (extern "torque_lang_Integer" TypeP)))))
 
 (defn global
   ([name init]

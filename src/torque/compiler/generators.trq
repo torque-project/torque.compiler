@@ -1,0 +1,55 @@
+(ns torque.compiler.generators
+  (:require
+    [torque.compiler.emit :as emit]))
+
+(defn ^:private protocol-meth [arities]
+  (->> (reduce
+         (fn [v impl]
+           (assoc v (inc (:arity impl)) (emit/bitcast (:value impl) emit/int8-ptr)))
+         (vec (replicate 8 emit/nil*))
+         arities)
+       (emit/array emit/int8-ptr)
+       (vector)
+       (emit/struct emit/arities-table)))
+
+(defn swizzle-cast [type val]
+  (emit/bitcast val type))
+
+(defn protocol [name id impls]
+  (->> impls
+       (mapv
+         (fn [impl]
+           (protocol-meth impl)))
+       (emit/array emit/arities-table)
+       (emit/global (str name "_methods"))
+       (swizzle-cast (emit/ptr-of emit/arities-table))
+       (vector (emit/int emit/int32 id))
+       (emit/struct emit/dispatch-entry)))
+
+(defn protocol* [name id & impls]
+  (protocol name id impls))
+
+(defn ctor [name type instance-struct field-types]
+  (emit/define-fun! (str name "_new") emit/ValueP (cons emit/int8-ptr field-types)
+    (fn [fun]
+      (let [instance (emit/bitcast (emit/arg fun 0) (emit/ptr-of instance-struct))]
+        (emit/set-field instance 0 type)
+        (loop [n     0
+               types field-types]
+          (when-let [field-type (first types)]
+            (emit/set-field instance (inc n) (emit/arg fun (inc n)))
+            (recur (inc n) (next types))))
+        (emit/bitcast instance emit/ValueP)))))
+
+(defn type [name fields protocol-fn]
+  (let [instance-type  (emit/define-struct name (vec (cons emit/TypeP fields)))
+        protocols      (protocol-fn instance-type)
+        table-size     (emit/int emit/int32 (count protocols))
+        protocol-table (emit/bitcast
+                        (emit/global (str name "_entries")
+                                     (emit/array emit/dispatch-entry protocols))
+                        emit/dispatch-table)
+        type           (->> (emit/struct emit/ValueType [table-size protocol-table])
+                            (emit/global name emit/ValueType))]
+    (ctor name type instance-type fields)
+    instance-type))
