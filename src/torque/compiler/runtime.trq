@@ -18,7 +18,9 @@
 
 (defn ^:private emit-binary-type []
   ;; TODO: implement protocol methods
-  (gen/type binary-type-name [emit/int64 emit/int8-ptr]
+  (gen/type binary-type-name
+    [{:type emit/int64    :name 'size :field-id 0}
+     {:type emit/int8-ptr :name 'data :field-id 1}]
     (fn [_]
       [])))
 

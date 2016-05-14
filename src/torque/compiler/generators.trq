@@ -2,6 +2,8 @@
   (:require
     [torque.compiler.emit :as emit]))
 
+(def max-field-length 256)
+
 (defn ^:private protocol-meth [arities]
   (->> (reduce
          (fn [v impl]
@@ -29,6 +31,32 @@
 (defn protocol* [name id & impls]
   (protocol name id impls))
 
+(defn import-strcmp []
+  (emit/declare-fun! "strncmp" emit/int32
+    [emit/int8-ptr emit/int8-ptr emit/int64]))
+
+(defn compare-field [this str strcmp]
+  (fn [field]
+    (let [field-name (emit/global ".field" (emit/string (name (:name field))))]
+      (fn []
+        (emit/select
+          (->> [field-name str (emit/int max-field-length)]
+               (emit/call strcmp)
+               (emit/cmp emit/eq emit/zero))
+          (emit/box (emit/get-field this (inc (:field-id field))))
+          emit/nil*)))))
+
+(defn field-selector [name type fields]
+  (let [strcmp (import-strcmp)
+        name   (str name "_get_field")]
+    (emit/define-fun! name emit/ValueP
+      [(emit/ptr-of type) emit/int8-ptr]
+      (fn [fun]
+        (let [this        (emit/arg fun 0)
+              str         (emit/arg fun 1)
+              field-tests (map (compare-field this str strcmp) fields)]
+          (emit/cond* emit/ValueP field-tests (fn [] emit/nil*)))))))
+
 (defn ctor [name type instance-struct field-types]
   (emit/define-fun! (str name "_new") emit/ValueP (cons emit/int8-ptr field-types)
     (fn [fun]
@@ -41,15 +69,25 @@
             (recur (inc n) (next types))))
         (emit/bitcast instance emit/ValueP)))))
 
+(defn field-type [field]
+  (:type field emit/ValueP))
+
 (defn type [name fields protocol-fn]
-  (let [instance-type  (emit/define-struct name (vec (cons emit/TypeP fields)))
+  (let [field-types    (map field-type fields)
+        instance-type  (emit/define-struct name (vec (cons emit/TypeP field-types)))
         protocols      (protocol-fn instance-type)
         table-size     (emit/int emit/int32 (count protocols))
         protocol-table (emit/bitcast
                         (emit/global (str name "_entries")
                                      (emit/array emit/dispatch-entry protocols))
                         emit/dispatch-table)
-        type           (->> (emit/struct emit/ValueType [table-size protocol-table])
+        num-fields     (emit/int emit/int32 (count fields))
+        field-selector (field-selector name instance-type fields)
+        type           (->> (emit/struct emit/ValueType
+                                         [table-size
+                                          protocol-table
+                                          num-fields
+                                          (emit/bitcast field-selector emit/int8-ptr)])
                             (emit/global name emit/ValueType))]
-    (ctor name type instance-type fields)
+    (ctor name type instance-type field-types)
     instance-type))

@@ -49,6 +49,7 @@
 (ffi/defimport br llvm LLVMBuildBr :void [:ptr :ptr])
 (ffi/defimport cond-br llvm LLVMBuildCondBr :ptr [:ptr :ptr :ptr :ptr])
 (ffi/defimport phi llvm LLVMBuildPhi :ptr [:ptr :ptr :string])
+(ffi/defimport -select llvm LLVMBuildSelect :ptr [:ptr :ptr :ptr :ptr :string])
 (ffi/defimport add-incoming! llvm LLVMAddIncoming :void [:ptr :ptr :ptr :uint32])
 (ffi/defimport alloca llvm LLVMBuildAlloca :ptr [:ptr :ptr :string])
 (ffi/defimport -store llvm LLVMBuildStore :ptr [:ptr :ptr :ptr])
@@ -85,7 +86,7 @@
 (ffi/defimport named-type llvm LLVMStructCreateNamed :ptr [:ptr :string])
 (ffi/defimport type-body llvm LLVMStructSetBody :void [:ptr :ptr :uint32 :bool])
 (ffi/defimport anon-type llvm LLVMStructType :ptr [:ptr :uint32 :bool])
-(ffi/defimport fun-type llvm LLVMFunctionType :ptr [:ptr :ptr :uint32 :bool])
+(ffi/defimport -fun-type llvm LLVMFunctionType :ptr [:ptr :ptr :uint32 :bool])
 (ffi/defimport ptr-type llvm LLVMPointerType :ptr [:ptr :uint32])
 (ffi/defimport arr-type llvm LLVMArrayType :ptr [:ptr :uint32])
 (ffi/defimport void-type llvm LLVMVoidType :ptr [])
@@ -94,17 +95,6 @@
 (ffi/defimport int16-type llvm LLVMInt16Type :ptr [])
 (ffi/defimport int32-type llvm LLVMInt32Type :ptr [])
 (ffi/defimport int64-type llvm LLVMInt64Type :ptr [])
-
-;; predefined types
-(def void  (void-type))
-(def int1  (int1-type))
-(def int8  (int8-type))
-(def int16 (int16-type))
-(def int32 (int32-type))
-(def int64 (int64-type))
-
-(def int8-ptr (ptr-type int8 0))
-(def int8-ptr-ptr (ptr-type int8-ptr 0))
 
 (def int-kind 8)
 (def ptr-kind 12)
@@ -169,7 +159,9 @@
   (-typeof [this] this))
 
 (defn type [x]
-  (new Type x))
+  (if (instance? Type x)
+    x
+    (new Type x)))
 
 (deftype Value [handle]
   IPrintable
@@ -234,14 +226,39 @@
 (defn ptr-of [x]
   (type (ptr-type (intptr (type-of x)) 0)))
 
+;; predefined types
+(def void  (type (void-type)))
+(def int1  (type (int1-type)))
+(def int8  (type (int8-type)))
+(def int16 (type (int16-type)))
+(def int32 (type (int32-type)))
+(def int64 (type (int64-type)))
+
+(def int8-ptr (ptr-of int8))
+(def int8-ptr-ptr (ptr-of int8-ptr))
+
 (defn array-type [t n]
   (type (arr-type (intptr t) n)))
 
-(defn define-struct [name field-types]
-  (let [t    (named-type (global-context) name)
+(defn declare-struct [n]
+  (type (named-type (global-context) n)))
+
+(defn define-struct [t field-types]
+  (let [t    (if (string? t) (declare-struct t) t)
         ptrs (util/ptrs-to-mem field-types)]
-    (type-body t ptrs (count field-types) false)
-    (type t)))
+    (type-body (intptr t) ptrs (count field-types) false)
+    t))
+
+(defn fun-type
+  ([ret args]
+   (fun-type ret args false))
+  ([ret args var]
+   (type
+     (-fun-type
+      (intptr ret)
+      (util/ptrs-to-mem (map type-of args))
+      (count args)
+      var))))
 
 ;; basic runtime type definitions
 (def arities-table
@@ -261,17 +278,23 @@
   "A pointer to a protocol dispatch table"
   (ptr-of dispatch-entry))
 
-(def ValueType (define-struct "ValueType" [int32 dispatch-table]))
+(def ValueType (declare-struct "ValueType"))
 (def TypeP     (ptr-of ValueType))
 (def Value     (define-struct "Value" [TypeP]))
 (def ValueP    (ptr-of Value))
 (def Protocol  (define-struct "Protocol" [TypeP int32]))
 (def ProtoP    (ptr-of Protocol))
 
+(define-struct ValueType
+  [int32
+   dispatch-table
+   int32
+   (ptr-of (fun-type ValueP [ValueP int8-ptr]))])
+
 ;; constant runtime values
 (def nil* (value (const-null (intptr ValueP))))
-(def zero (value (const-int int32 0 false)))
-(def one  (value (const-int int32 1 false)))
+(def zero (value (const-int (intptr int32) 0 false)))
+(def one  (value (const-int (intptr int32) 1 false)))
 
 (defn null [t]
   (value (const-null (intptr t))))
@@ -283,8 +306,8 @@
   (if (boolean? x)
     (value
       (if x
-        (const-int int1 1 false)
-        (const-int int1 0 false)))
+        (const-int (intptr int1) 1 false)
+        (const-int (intptr int1) 0 false)))
     ;; TODO: error
     ))
 
@@ -293,7 +316,7 @@
    (int int64 x))
   ([t x]
    (if (integer? x)
-     (value (const-int t x true))
+     (value (const-int (intptr t) x true))
      ;; TODO: error
      )))
 
@@ -320,6 +343,7 @@
   (value (-load (intptr *builder*) (intptr mutable) name)))
 
 (defn get-field [x idx]
+
   (load (struct-gep (intptr *builder*) (intptr x) idx "") ""))
 
 (defn set-field [inst n val]
@@ -343,22 +367,15 @@
  ([name ret args]
   (declare-fun! name ret args false))
  ([name ret args var]
-  (let [ptrs (util/ptrs-to-mem args)
-        type (fun-type (intptr ret) ptrs (count args) var)]
+  (let [type (fun-type (type ret) (map type args) var)]
     (or (ffi/not-null (get-fun (intptr *unit*) name))
-        (add-fun! (intptr *unit*) name type)))))
+        (add-fun! (intptr *unit*) name (intptr type))))))
 
 (defn declare-ctor! [name fields]
-  (declare-fun!
-    (str name "_new")
-    (intptr ValueP)
-    (cons int8-ptr fields)))
+  (declare-fun! (str name "_new") ValueP (cons int8-ptr fields)))
 
 (defn fun-from-args [ptr ret args]
-  (->> (fun-type (intptr ret)
-                 (util/ptrs-to-mem (map type-of args))
-                 (count args)
-                 false)
+  (->> (fun-type ret args)
        (type)
        (ptr-of)
        (bitcast ptr)))
@@ -445,8 +462,8 @@
   (-return (intptr *builder*) (intptr (box value))))
 
 (defn define-fun! [name ret args body-fn]
-  (let [type  (fun-type (intptr ret) (util/ptrs-to-mem args) (count args) false)
-        fun   (add-fun! (intptr *unit*) name type)
+  (let [type  (fun-type ret args)
+        fun   (add-fun! (intptr *unit*) name (intptr type))
         entry (value (add-block! fun "entry"))]
     (with-builder (builder entry)
       (return (body-fn fun)))
@@ -566,29 +583,41 @@
   (br (intptr *builder*) point)
   nil)
 
+(defn cond*
+  ([type fs]
+   (cond* type fs nil))
+  ([type fs default]
+   (let [fun    (current-fun)
+         intro  (get-insert-block (intptr *builder*))
+         out    (add-block! fun "")
+         blocks (cons intro
+                      (repeatedly (dec (count fs))
+                                  (fn [] (insert-block! out ""))))
+         fs     (if default (concat fs [default]) fs)
+         values (mapv
+                 (fn [f blocks]
+                   (set-insert-block! (intptr *builder*) (first blocks))
+                   (let [v (f)]
+                     (if (== out (second blocks))
+                       (br (intptr *builder*) out)
+                       (cond-br (intptr *builder*)
+                                (intptr (truthy v))
+                                out
+                                (second blocks)))
+                     v))
+                 fs (partition 2 1 [out] blocks))]
+     (cont type out values blocks))))
+
 (defn short-and
   "Builds a short circuit logical and construct out of a list of
    builder functions"
   [& fs]
-  (let [fun    (current-fun)
-        intro  (get-insert-block (intptr *builder*))
-        out    (add-block! fun "")
-        blocks (cons intro
-                     (repeatedly (dec (count fs))
-                                 (fn [] (insert-block! out ""))))
-        values (mapv
-                 (fn [f blocks]
-                   (set-insert-block! (intptr *builder*) (first blocks))
-                   (let [v (truthy (f))]
-                     (if (== out (second blocks))
-                       (br (intptr *builder*) out)
-                       (cond-br (intptr *builder*)
-                                (intptr v)
-                                (second blocks)
-                                out))
-                     v))
-                 fs (partition 2 1 [out] blocks))]
-    (cont int1 out values blocks)))
+  (cond* int1 fs))
+
+(declare log)
+
+(defn select [cond a b]
+  (value (-select (intptr *builder*) (intptr cond) (intptr a) (intptr b) "")))
 
 (defn ^:private value-identical [a b]
   (if*
@@ -631,9 +660,12 @@
   (call (declare-fun! "putchar" int32 [int32]) [(int int32 ch)]))
 
 (defn log [s x]
-  (let [s (global ".print" (value (const-string s 4 false)))]
+  (let [s (global ".print" (value (const-string s (count s) false)))]
     (call (declare-fun! "printf" int32 [int8-ptr] true) [s x])
     x))
+
+(defn string [init]
+  (value (const-string init (count init) false)))
 
 (defn array [type vals]
   (let [ptrs (util/ptrs-to-mem vals)]

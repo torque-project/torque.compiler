@@ -261,19 +261,25 @@
     extensions))
 
 (defmethod -compile-ast :deftype [ast ctx]
-  (let [name   (name (:name ast))
-        fields (replicate (count (:fields ast)) (emit/type emit/int8-ptr))
-        type   (gen/type name fields
-                 (fn [type]
-                   (->> (assoc ctx :frame type)
-                        (compile-extensions name (:extensions ast)))))]
+  (let [name (name (:name ast))
+        type (gen/type name (:fields ast)
+               (fn [type]
+                 (->> (assoc ctx :frame type)
+                      (compile-extensions name (:extensions ast)))))]
     {:value emit/nil*}))
+
+(defmethod -compile-ast :type-field [ast ctx]
+  (let [val       (:value (-compile-ast (:target ast) ctx))
+        type (emit/get-field val 0)
+        field-fun (emit/get-field type 3)
+        s (emit/global ".field" (emit/string (name (:field ast))))]
+    {:value (emit/call field-fun [val s])}))
 
 (defmethod -compile-ast :new [ast ctx]
   {:value
    (emit/new*
      (name (-> ast :class :var :name))
-     (map :value (compile-all (:args ast) ctx)))})
+     (map (fn [x] (emit/box (:value x))) (compile-all (:args ast) ctx)))})
 
 (defmethod -compile-ast :protocol [ast ctx]
   (let [name     (str (name (:name ast)) "_protocol")
@@ -361,6 +367,7 @@
      ~@body))
 
 (defn eval-ast [ast]
+  ;; (print (dissoc ast :env))
   (let [name (name (gensym "eval"))
         unit (emit/unit name)]
     (emit/with-unit unit
