@@ -33,6 +33,7 @@
 (ffi/defimport -builder llvm LLVMCreateBuilder :ptr [])
 (ffi/defimport builder-fun llvm LLVMGetBasicBlockParent :ptr [:ptr])
 (ffi/defimport get-insert-block llvm LLVMGetInsertBlock :ptr [:ptr])
+(ffi/defimport get-first-block llvm LLVMGetFirstBasicBlock :ptr [:ptr])
 (ffi/defimport set-insert-block! llvm LLVMPositionBuilderAtEnd :ptr [:ptr :ptr])
 (ffi/defimport dispose-builder llvm LLVMDisposeBuilder :void [:ptr])
 (ffi/defimport -return  llvm LLVMBuildRet :ptr [:ptr :ptr])
@@ -66,6 +67,7 @@
 (ffi/defimport -find-type llvm LLVMGetTypeByName :ptr [:ptr :string])
 (ffi/defimport get-type llvm LLVMTypeOf :ptr [:ptr])
 (ffi/defimport kind   llvm LLVMGetTypeKind :uint32 [:ptr])
+(ffi/defimport integer-width llvm LLVMGetIntTypeWidth :uint32 [:ptr])
 
 (ffi/defimport pr-module llvm LLVMPrintModuleToString :ptr [:ptr])
 (ffi/defimport pr-type   llvm LLVMPrintTypeToString :ptr [:ptr])
@@ -352,6 +354,12 @@
 (defn value-type [val]
   (get-field val 0))
 
+(defn true* []
+  (load (extern "torque_lang_True" ValueP) ""))
+
+(defn false* []
+  (load (extern "torque_lang_False" ValueP) ""))
+
 (defn bitcast
   ([val type]
    (value (const-cast (intptr val) (intptr type))))
@@ -451,21 +459,36 @@
          (-call ctor (util/ptrs-to-mem values) (inc num) "")
          (value)))))
 
+(defn ^:private force-box [x]
+  (-> (declare-fun! "torque_lang_Integer_new" ValueP [int64])
+      (call [x])))
+
+(defn ^:private select-boolean [x]
+  (value
+    (-select (intptr *builder*) 
+             (intptr x)
+             (intptr (true*))
+             (intptr (false*))
+             "")))
+
 (defn box [x]
   (when x
-    (if (= (-> x type-of intptr kind) int-kind)
-      (-> (declare-fun! "torque_lang_Integer_new" ValueP [int64])
-          (call [x]))
-      x)))
+    (let [type (type-of x)]
+      (if (= (-> type intptr kind) int-kind)
+        (let [width (integer-width (intptr type))]
+          (if (== width 1)
+            (select-boolean x)
+            (force-box x)))
+        x))))
 
-(defn return [value]
-  (-return (intptr *builder*) (intptr (box value))))
+(defn return [val]
+  (-return (intptr *builder*) (intptr (box val))))
 
 (defn define-fun! [name ret args body-fn]
-  (let [type  (fun-type ret args)
-        fun   (add-fun! (intptr *unit*) name (intptr type))
-        entry (value (add-block! fun "entry"))]
-    (with-builder (builder entry)
+  (let [fun   (declare-fun! name ret args)]
+    (when (ffi/not-null (get-first-block fun))
+      (throw (ex-info (str "Function " name " is already defined") {})))
+    (with-builder (builder (value (add-block! fun "entry")))
       (return (body-fn fun)))
     fun))
 
@@ -527,11 +550,17 @@
   (value (-icmp (intptr *builder*) op (intptr a) (intptr b) "")))
 
 (defn ^:private not-nil? [x]
-  (-icmp (intptr *builder*) ne (intptr nil*) (intptr x) ""))
+  (value (-icmp (intptr *builder*) ne (intptr nil*) (intptr x) "")))
 
 (defn ^:private truthy [x]
   (if (= (kind (intptr (type-of x))) ptr-kind)
-    (value (not-nil? x))
+    (bit-and (value
+              (-icmp (intptr *builder*)
+                     ne
+                     (intptr x)
+                     (intptr (false*))
+                     ""))
+            (not-nil? x))
     x))
 
 (defn ^:private branch [block cont branch-fn]
@@ -614,19 +643,23 @@
   [& fs]
   (cond* int1 fs))
 
-(declare log)
-
 (defn select [cond a b]
   (value (-select (intptr *builder*) (intptr cond) (intptr a) (intptr b) "")))
 
 (defn ^:private value-identical [a b]
   (if*
-    (fn []
-      (short-and (partial boxed? a) (partial boxed? b)))
-    (fn []
-      (cmp eq (unbox a) (unbox b)))
-    (fn []
-      (cmp eq a b))))
+   (fn []
+     (bit-and (not-nil? a) (not-nil? b)))
+   (fn []
+     (if*
+      (fn []
+        (short-and (partial boxed? a) (partial boxed? b)))
+      (fn []
+        (cmp eq (unbox a) (unbox b)))
+      (fn []
+        (cmp eq a b))))
+   (fn []
+     (cmp eq a b))))
 
 (defn identical [a b]
   (if (= (type-of a) (type-of b))
@@ -663,6 +696,10 @@
   (let [s (global ".print" (value (const-string s (count s) false)))]
     (call (declare-fun! "printf" int32 [int8-ptr] true) [s x])
     x))
+
+(defn print [x]
+  (log "%s\n" (unbox x))
+  nil*)
 
 (defn string [init]
   (value (const-string init (count init) false)))

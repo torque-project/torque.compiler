@@ -39,7 +39,8 @@
    (cond
      (= (:type ast) :nil)    emit/nil*
      (= (:type ast) :bool)   (emit/bool (:val ast))
-     (= (:type ast) :number) (emit/int (:val ast)))})
+     (= (:type ast) :number) (emit/int (:val ast))
+     (= (:type ast) :string) (rt/make-string (:val ast)))})
 
 (defmethod -compile-ast :local [ast ctx]
   {:value
@@ -62,11 +63,11 @@
 
 (defn ^:private emit-bindings [ast ctx]
   (reduce
-   (fn [ctx binding]
-     (let [value (-compile-ast (:init binding) ctx)]
-       (assoc-in ctx [:env :locals (:name binding)] value)))
-    ctx
-    (:bindings ast)))
+    (fn [ctx binding]
+      (let [value (-compile-ast (:init binding) ctx)]
+        (assoc-in ctx [:env :locals (:name binding)] (:value value))))
+   ctx
+   (:bindings ast)))
 
 (defmethod -compile-ast :let [ast ctx]
   (-compile-ast (:body ast) (emit-bindings ast ctx)))
@@ -82,7 +83,7 @@
 (defn ^:private load-loop-bindings [bindings mutables]
   (->> (map (fn [binding mutable]
               (let [n (:name binding)]
-                [n {:value (emit/load mutable (name n))}]))
+                [n (emit/load mutable (name n))]))
             bindings
             mutables)
        (into {})))
@@ -126,33 +127,52 @@
 (defn ^:private call-frame [ctx tag frame-type]
   (merge ctx {:tag tag :frame frame-type}))
 
+(defn ^:private add-fn-frame [methods ctx]
+  (map (fn [meth]
+         (update-in meth [:params]
+                    (fn [params]
+                      (cons {:name 'frame
+                             :arg-id 0
+                             :type (emit/ptr-of (:frame ctx))}
+                            (map (fn [param]
+                                   (update param :arg-id inc))
+                                 params)))))
+       methods))
+
 (defmethod -compile-ast :fn [ast ctx]
   (let [name  (name (or (:name ast) (gensym "fn")))
         qname name ;; (str (:ns @*compiler-env*) "_" name)
         type  (gen/type qname []
                 (fn [type]
-                  (->> (call-frame ctx qname type)
-                       (compile-all (:methods ast))
-                       (gen/protocol* qname rt/ifn)
-                       (list))))]
+                  (let [ctx   (call-frame ctx qname type)
+                        meths (add-fn-frame (:methods ast) ctx)]
+                    (->> (compile-all meths ctx)
+                         (gen/protocol* qname rt/ifn)
+                         (list)))))]
     {:value (emit/new* qname [])}))
 
 (defn ^:private emit-params [ast ctx]
   (reduce
     (fn [ctx binding]
-      (let [value (emit/fn-arg (:fun ctx) (:arg-id binding))]
+      (let [value (emit/arg (:fun ctx) (:arg-id binding))]
         (assoc-in ctx
           [:env :locals (:name binding)]
           value)))
     ctx
     (:params ast)))
 
+(defn ^:private emit-fn-local [ast ctx]
+  (if (:local ast)
+    (->> (emit/arg (:fun ctx) 0)
+         (assoc-in ctx [:locals (:name (:local ast))]))
+    ctx))
+
 (defn ^:private arg-types [ast ctx]
   ;; TODO: emit optimized fn types
-  (cond-> (cons (emit/ptr-of (:frame ctx))
-                (replicate (count (:params ast)) emit/ValueP))
+  (cond-> (map (fn [x] (:type x emit/ValueP)) (:params ast))
+    ;; )
     ;; add one extra arg in case of a variadic fn
-    (:variadic? ast) (cons emit/int8-ptr)))
+    (:variadic? ast) (cons emit/ValueP)))
 
 (defmethod -compile-ast :fn-method [ast ctx]
   (let [name (emit/mangle (:tag ctx) ast)]
@@ -162,6 +182,7 @@
      (emit/define-fun! name emit/ValueP (arg-types ast ctx)
        (fn [fun]
          (->> (fun-context fun)
+              (emit-fn-local ast)
               (emit-params ast)
               (-compile-ast (:body ast))
               :value)))}))
@@ -177,7 +198,6 @@
 
 (defn ^:private emit-protocol-call [callable protocol meth arity args]
   (let [ptr  (load-dispatch-table protocol meth arity)
-        args (cons callable args)
         fun  (emit/fun-from-args ptr emit/ValueP args)]
     (emit/call fun args)))
 
@@ -188,7 +208,7 @@
       (emit/int emit/int32 id))
     (emit/int emit/int32 meth)
     (emit/int emit/int32 (inc arity))
-    args))
+    (cons callable args)))
 
 (defn find-protocol [type protocol]
   (let [extensions (load-extensions type)
@@ -202,8 +222,8 @@
           (fn []
             (emit/if* emit/methods
               (fn []
-                (let [extension (load-extension extensions idx)
-                      id        (emit/get-field extensions 0)]
+                (let [cur       (emit/load idx "idx")
+                      id (emit/deref extensions [cur emit/zero])]
                   (emit/cmp emit/eq id protocol)))
               (fn []
                 (load-extension extensions (emit/load idx "idx")))
@@ -232,7 +252,7 @@
          self
          extension
          (emit/int emit/int32 method)
-         (emit/int emit/int32 (inc (count args)))
+         (emit/int emit/int32 (count args))
          (map :value args))}))
 
 (defn ^:private resolve-protocol [protocol]
@@ -248,7 +268,15 @@
       (let [meth     (first x)
             tag      (str name "_" meth)
             meth-ctx (assoc ctx :tag tag)]
-        (compile-all (get methods meth) meth-ctx)))
+        (map (fn [x]
+               (update-in x [:arity] dec))
+             (compile-all (map (fn [x]
+                                 (update-in x [:params 0]
+                                            assoc
+                                            :type
+                                            (emit/ptr-of (:frame ctx))))
+                               (get methods meth))
+                          meth-ctx))))
     methods))
 
 (defn ^:private compile-extensions [name extensions ctx]
@@ -291,8 +319,8 @@
 (defmethod -compile-ast :def [ast ctx]
   (let [n     (:name ast)
         init  (:init ast)
-        value (some-> init (-compile-ast ctx))
-        global (emit/global (name n) emit/nil*)]
+        global (emit/global (name n) emit/nil*)
+        value (some-> init (-compile-ast ctx))]
     (emit/store global (and value (emit/box (:value value))))
     (or value {:value emit/nil*})))
 
@@ -304,7 +332,8 @@
      (= op "array?")      emit/nil*
      (= op "type")        (emit/value-type (emit/box x))
      (= op "make-binary") (rt/make-binary (emit/unbox x))
-     (= op "blength")     (rt/blength x)))
+     (= op "blength")     (rt/blength x)
+     (= op "print")       (emit/print x)))
   ([op ctx a b]
    (cond
      ;; operator intrinsics
@@ -367,7 +396,6 @@
      ~@body))
 
 (defn eval-ast [ast]
-  ;; (print (dissoc ast :env))
   (let [name (name (gensym "eval"))
         unit (emit/unit name)]
     (emit/with-unit unit

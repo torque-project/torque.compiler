@@ -16,22 +16,31 @@
 (defn binary-type []
   (emit/find-type binary-type-name))
 
+(defn ^:private binary-to-pointer [type]
+  (->> (emit/define-fun! (str binary-type-name "_IPointerTarget_-intptr_1")
+         emit/ValueP [(emit/ptr-of type)]
+         (fn [fun]
+           (emit/force-box (emit/get-field (emit/arg fun 0) 2))))
+       (hash-map :arity 0 :value)
+       (list)))
+
 (defn ^:private emit-binary-type []
   ;; TODO: implement protocol methods
   (gen/type binary-type-name
     [{:type emit/int64    :name 'size :field-id 0}
      {:type emit/int8-ptr :name 'data :field-id 1}]
-    (fn [_]
-      [])))
+    (fn [type]
+      [(gen/protocol* binary-type-name pointer (binary-to-pointer type))])))
 
 (defn ^:private binary-ctor []
   (emit/declare-ctor! binary-type-name [emit/int64 emit/int8-ptr]))
 
-(defn make-binary [size]
-  (let [ctor      (binary-ctor)
-        type-size (emit/sizeof (binary-type))
-        ptr       (emit/allocate (emit/add type-size size))]
-    (emit/call ctor [ptr size (emit/advance-ptr ptr size)])))
+(defn make-binary
+  ([size]
+   (let [ctor      (binary-ctor)
+         type-size (emit/sizeof (binary-type))
+         ptr       (emit/allocate (emit/add type-size size))]
+     (emit/call ctor [ptr size (emit/advance-ptr ptr size)]))))
 
 (defn bget [b idx]
   (-> (emit/bitcast b (emit/ptr-of (binary-type)))
@@ -40,6 +49,13 @@
 
 (defn blength [b]
   (emit/get-field (emit/bitcast b (emit/ptr-of (binary-type))) 1))
+
+(defn make-string [s]
+  (let [data   (emit/global ".string.literal" (emit/string s))
+        size   (emit/int (count s))
+        space  (emit/allocate (emit/sizeof (binary-type)))
+        binary (emit/call (binary-ctor) [space size data])]
+    (emit/new* "String" [binary (emit/box emit/one) (emit/box size)])))
 
 (defn rt0 []
   (emit/with-unit (emit/unit "__torque_rt0")
