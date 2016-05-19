@@ -1,0 +1,69 @@
+(ns torque.compiler.builtins
+ (:require
+   [torque.compiler.emit :as emit]))
+
+(def binary-type-name "torque_lang_Binary")
+(def array-type-name  "torque_lang_Array")
+
+(defn binary []
+  (emit/import-type binary-type-name))
+
+(defn binary-type []
+  (emit/find-type binary-type-name))
+
+(defn array []
+  (emit/import-type array-type-name))
+
+(defn array-type []
+  (emit/find-type array-type-name))
+
+(defn ^:private binary-ctor []
+  (emit/declare-ctor! binary-type-name [emit/int64 emit/int8-ptr]))
+
+(defn make-binary
+  ([size]
+   (let [ctor      (binary-ctor)
+         type-size (emit/sizeof (binary-type))
+         ptr       (emit/allocate (emit/add type-size size))]
+     (emit/call ctor [ptr size (emit/advance-ptr ptr size)]))))
+
+(defn bget [b idx]
+  (-> (emit/bitcast b (emit/ptr-of (binary-type)))
+      (emit/get-field 2)
+      (emit/buffer-at idx)))
+
+(defn blength [b]
+  (emit/get-field (emit/bitcast b (emit/ptr-of (binary-type))) 1))
+
+(defn ^:private array-ctor []
+  (emit/declare-ctor! array-type-name [emit/int64 emit/ValueP]))
+
+(defn make-array
+  ([count]
+   (let [ctor      (array-ctor)
+         type-size (emit/sizeof (array-type))
+         size      (emit/add type-size (emit/mul count emit/pointer-size))
+         ptr       (emit/allocate (emit/add type-size size))
+         array     (emit/bitcast (emit/advance-ptr ptr size) emit/ValueP)]
+     (emit/call ctor [ptr count array]))))
+
+(defn aget [a idx]
+  (-> (emit/bitcast a (emit/ptr-of (array-type)))
+      (emit/get-field 2)
+      (emit/buffer-at idx)))
+
+(defn aset [a idx val]
+  (-> (emit/bitcast a (emit/ptr-of (array-type)))
+      (emit/get-field 2)
+      (emit/advance-ptr idx)
+      (emit/store val)))
+
+(defn alength [a]
+  (emit/get-field (emit/bitcast a (emit/ptr-of (array-type))) 1))
+
+(defn make-string [s]
+  (let [data   (emit/global ".string.literal" (emit/string s))
+        size   (emit/int (count s))
+        space  (emit/allocate (emit/sizeof (binary-type)))
+        binary (emit/call (binary-ctor) [space size data])]
+    (emit/new* "String" [binary (emit/box emit/one) (emit/box size)])))

@@ -1,13 +1,98 @@
 (ns torque.compiler.generators
   (:require
+    [torque.compiler.builtins :as builtin]
     [torque.compiler.emit :as emit]))
 
 (def max-field-length 256)
 
+(defn ^:private load-extensions [type]
+  (emit/get-field type 1))
+
+(defn ^:private load-extension [extensions id]
+  (emit/deref extensions [id emit/one]))
+
+(defn ^:private load-dispatch-table [protocol idx arity]
+  (emit/deref protocol [idx emit/zero arity]))
+
+(defn ^:private emit-protocol-call [callable protocol meth arity args]
+  (let [ptr  (load-dispatch-table protocol meth arity)
+        fun  (emit/fun-from-args ptr emit/ValueP args)]
+    (emit/call fun args)))
+
+(defn ^:private emit-protocol-call* [callable id meth arity args]
+  (emit-protocol-call callable
+    (load-extension
+      (load-extensions (emit/get-field callable 0))
+      (emit/int emit/int32 id))
+    (emit/int emit/int32 meth)
+    (emit/int emit/int32 (inc arity))
+    (cons callable args)))
+
+(defn find-protocol [type protocol]
+  (let [extensions (load-extensions type)
+        size       (emit/get-field type 0)
+        idx        (emit/mutable-local emit/zero "nexts")]
+    (emit/in-block "dispatch"
+      (fn [block]
+        (emit/if* emit/methods
+          (fn []
+            (->> (emit/load idx "idx") (emit/cmp emit/gt size)))
+          (fn []
+            (emit/if* emit/methods
+              (fn []
+                (let [cur (emit/load idx "idx")
+                      id  (emit/deref extensions [cur emit/zero])]
+                  (emit/cmp emit/eq id protocol)))
+              (fn []
+                (load-extension extensions (emit/load idx "idx")))
+              (fn []
+                (emit/store idx (emit/add (emit/load idx "id") emit/one))
+                (emit/recur* block))))
+          (fn []
+            emit/not-implemented))))))
+
+(defn ^:private fixed-args [fun max-fixed-arity]
+  (map (partial emit/fn-arg fun) (range max-fixed-arity)))
+
+(defn ^:private mangle-forwarder [arity max-fixed-arity]
+  (str "__rest_arg_forwarder_" arity "_" max-fixed-arity))
+
+(defn ^:private variadic-forwarder [arity max-fixed-arity]
+  (emit/define-fun! (mangle-forwarder arity max-fixed-arity)
+       {:link :once}
+       emit/ValueP (vec (repeat (inc arity) emit/ValueP))
+       (fn [fun]
+         ;; accumulate args and call rest arg arity
+         (let [count (- arity max-fixed-arity)
+               arr   (builtin/make-array (emit/int arity))]
+           (dotimes [n count]
+             (builtin/aset arr (emit/int n) (emit/fn-arg fun n)))
+           ;; call thru to actual impl
+           (emit-protocol-call*
+            (emit/arg fun 0)
+            0 0 max-fixed-arity
+            (concat (fixed-args fun max-fixed-arity) [arr]))))))
+
+(defn ^:private variadic-forwarders [arities max-fixed-arity]
+  (if (< max-fixed-arity 8)
+    (let [start-arity (+ max-fixed-arity 2)]
+      (reduce
+        (fn [v arity]
+          (->> (-> (variadic-forwarder arity max-fixed-arity)
+                   (emit/value)
+                   (emit/bitcast emit/int8-ptr))
+               (assoc v arity)))
+        arities
+        (take (- 8 start-arity) (iterate inc start-arity))))))
+
 (defn ^:private protocol-meth [arities]
   (->> (reduce
          (fn [v impl]
-           (assoc v (inc (:arity impl)) (emit/bitcast (:value impl) emit/int8-ptr)))
+           (let [fun-ptr (emit/bitcast (:value impl) emit/int8-ptr)
+                 out     (assoc v (inc (:arity impl)) fun-ptr)]
+             (if (:variadic? impl)
+               (variadic-forwarders out (:arity impl))
+               out)))
          (vec (replicate 8 emit/nil*))
          arities)
        (emit/array emit/int8-ptr)

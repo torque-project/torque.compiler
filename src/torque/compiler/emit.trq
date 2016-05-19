@@ -28,6 +28,7 @@
 (ffi/defimport add-block! llvm LLVMAppendBasicBlock :ptr [:ptr :string])
 (ffi/defimport insert-block! llvm LLVMInsertBasicBlock :ptr [:ptr :string])
 (ffi/defimport get-arg llvm LLVMGetParam :ptr [:ptr :uint32])
+(ffi/defimport set-linkage! llvm LLVMSetLinkage :void [:ptr :uint32])
 
 ;; builder API
 (ffi/defimport -builder llvm LLVMCreateBuilder :ptr [])
@@ -298,6 +299,8 @@
 (def zero (value (const-int (intptr int32) 0 false)))
 (def one  (value (const-int (intptr int32) 1 false)))
 
+(def pointer-size (value (const-int (intptr int64) 8 false)))
+
 (defn null [t]
   (value (const-null (intptr t))))
 
@@ -484,13 +487,24 @@
 (defn return [val]
   (-return (intptr *builder*) (intptr (box val))))
 
-(defn define-fun! [name ret args body-fn]
-  (let [fun   (declare-fun! name ret args)]
-    (when (ffi/not-null (get-first-block fun))
-      (throw (ex-info (str "Function " name " is already defined") {})))
-    (with-builder (builder (value (add-block! fun "entry")))
-      (return (body-fn fun)))
-    fun))
+(defn ^:private linkage-flag [linkage]
+  (cond
+    (= linkage :once) 3
+    :else
+    (throw (ex-info (str "Unsupported linkage type: " linkage) {}))))
+
+(defn define-fun!
+  ([name ret args body-fn]
+   (define-fun! name {}  ret args body-fn))
+  ([name opts ret args body-fn]
+   (let [fun (declare-fun! name ret args)]
+     (when-let [linkage (:link opts)]
+       (set-linkage! (intptr fun) (linkage-flag linkage)))
+     (when (ffi/not-null (get-first-block fun))
+       (throw (ex-info (str "Function " name " is already defined") {})))
+     (with-builder (builder (value (add-block! fun "entry")))
+       (return (body-fn fun)))
+     fun)))
 
 (defn arg [fun n]
   (value (get-arg fun n)))

@@ -6,9 +6,10 @@
     [torque.analyzer.env :as env]
     [torque.analyzer.torque :as trq]
     [torque.analyzer.resolver :as r]
-    [torque.compiler.jit  :as jit]
+    [torque.compiler.builtins :as builtin]
     [torque.compiler.emit :as emit]
     [torque.compiler.generators :as gen]
+    [torque.compiler.jit :as jit]
     [torque.compiler.runtime :as rt]
     [torque.io.fs :as fs]))
 
@@ -40,7 +41,7 @@
      (= (:type ast) :nil)    emit/nil*
      (= (:type ast) :bool)   (emit/bool (:val ast))
      (= (:type ast) :number) (emit/int (:val ast))
-     (= (:type ast) :string) (rt/make-string (:val ast)))})
+     (= (:type ast) :string) (builtin/make-string (:val ast)))})
 
 (defmethod -compile-ast :local [ast ctx]
   {:value
@@ -140,15 +141,16 @@
        methods))
 
 (defmethod -compile-ast :fn [ast ctx]
-  (let [name  (name (or (:name ast) (gensym "fn")))
-        qname name ;; (str (:ns @*compiler-env*) "_" name)
-        type  (gen/type qname []
-                (fn [type]
-                  (let [ctx   (call-frame ctx qname type)
-                        meths (add-fn-frame (:methods ast) ctx)]
-                    (->> (compile-all meths ctx)
-                         (gen/protocol* qname rt/ifn)
-                         (list)))))]
+  (let [name      (name (or (:name ast) (gensym "fn")))
+        qname     name ;; (str (:ns @*compiler-env*) "_" name)
+        max-arity (:max-fixed-arity ast)
+        type      (gen/type qname []
+                    (fn [type]
+                      (let [ctx   (call-frame ctx qname type)
+                            meths (add-fn-frame (:methods ast) ctx)]
+                        (->> (compile-all meths ctx)
+                             (gen/protocol* qname rt/ifn)
+                             (list)))))]
     {:value (emit/new* qname [])}))
 
 (defn ^:private emit-params [ast ctx]
@@ -168,11 +170,11 @@
     ctx))
 
 (defn ^:private arg-types [ast ctx]
-  ;; TODO: emit optimized fn types
-  (cond-> (map (fn [x] (:type x emit/ValueP)) (:params ast))
-    ;; )
-    ;; add one extra arg in case of a variadic fn
-    (:variadic? ast) (cons emit/ValueP)))
+  (let [args (map (fn [x] (:type x emit/ValueP)) (:params ast))]
+    (if (:variadic? ast)
+      ;; add one extra arg in case of a variadic fn
+      (cons emit/ValueP args)
+      args)))
 
 (defmethod -compile-ast :fn-method [ast ctx]
   (let [name (emit/mangle (:tag ctx) ast)]
@@ -187,56 +189,10 @@
               (-compile-ast (:body ast))
               :value)))}))
 
-(defn ^:private load-extensions [type]
-  (emit/get-field type 1))
-
-(defn ^:private load-extension [extensions id]
-  (emit/deref extensions [id emit/one]))
-
-(defn ^:private load-dispatch-table [protocol idx arity]
-  (emit/deref protocol [idx emit/zero arity]))
-
-(defn ^:private emit-protocol-call [callable protocol meth arity args]
-  (let [ptr  (load-dispatch-table protocol meth arity)
-        fun  (emit/fun-from-args ptr emit/ValueP args)]
-    (emit/call fun args)))
-
-(defn ^:private emit-protocol-call* [ctx callable id meth arity args]
-  (emit-protocol-call callable
-    (load-extension
-      (load-extensions (emit/get-field callable 0))
-      (emit/int emit/int32 id))
-    (emit/int emit/int32 meth)
-    (emit/int emit/int32 (inc arity))
-    (cons callable args)))
-
-(defn find-protocol [type protocol]
-  (let [extensions (load-extensions type)
-        size       (emit/get-field type 0)
-        idx        (emit/mutable-local emit/zero "nexts")]
-    (emit/in-block "dispatch"
-      (fn [block]
-        (emit/if* emit/methods
-          (fn []
-            (->> (emit/load idx "idx") (emit/cmp emit/gt size)))
-          (fn []
-            (emit/if* emit/methods
-              (fn []
-                (let [cur       (emit/load idx "idx")
-                      id (emit/deref extensions [cur emit/zero])]
-                  (emit/cmp emit/eq id protocol)))
-              (fn []
-                (load-extension extensions (emit/load idx "idx")))
-              (fn []
-                (emit/store idx (emit/add (emit/load idx "id") emit/one))
-                (emit/recur* block))))
-          (fn []
-            emit/not-implemented))))))
-
 (defn satisfies [protocol x]
   (let [protocol (emit/bitcast protocol emit/ProtoP)]
     (emit/cmp emit/ne
-      (find-protocol (emit/get-field x 0) (emit/get-field protocol 1))
+      (gen/find-protocol (emit/get-field x 0) (emit/get-field protocol 1))
       emit/not-implemented)))
 
 (defmethod -compile-ast :dispatch [ast ctx]
@@ -246,9 +202,9 @@
         args       (compile-all (:args ast) ctx)
         self       (emit/bitcast (:value (first args)) emit/ValueP)
         type       (emit/get-field self 0)
-        extension  (find-protocol type (emit/int emit/int32 (:id protocol)))]
+        extension  (gen/find-protocol type (emit/int emit/int32 (:id protocol)))]
     {:value
-      (emit-protocol-call
+      (gen/emit-protocol-call
          self
          extension
          (emit/int emit/int32 method)
@@ -328,11 +284,13 @@
   ([op ctx x]
    (cond
      ;; (= op "integer?")    (emit/integer? x)
-     (= op "binary?")     (emit/instance-of (rt/binary) x)
-     (= op "array?")      emit/nil*
+     (= op "binary?")     (emit/instance-of (builtin/binary) x)
+     (= op "array?")      (emit/instance-of (builtin/array) x)
      (= op "type")        (emit/value-type (emit/box x))
-     (= op "make-binary") (rt/make-binary (emit/unbox x))
-     (= op "blength")     (rt/blength x)
+     (= op "make-binary") (builtin/make-binary (emit/unbox x))
+     (= op "blength")     (builtin/blength x)
+     (= op "make-array")  (builtin/make-array (emit/unbox x))
+     (= op "alength")     (builtin/alength x)
      (= op "print")       (emit/print x)))
   ([op ctx a b]
    (cond
@@ -354,7 +312,11 @@
      ;; builtin functions
      (= op "identical?") (emit/identical a b)
      (= op "satisfies?") (satisfies a b)
-     (= op "bget")       (rt/bget a (emit/unbox b)))))
+     (= op "bget")       (builtin/bget a (emit/unbox b))
+     (= op "aget")       (builtin/aget a (emit/unbox b))))
+  ([op ctx a b c]
+   (cond
+     (= op "aset") (builtin/aset a (emit/unbox b) c))))
 
 (defn ^:private emit-instrinsic [callable args ctx]
   (let [op (name (:field callable))]
@@ -366,18 +328,14 @@
     (if (< arity 8)
       ;; callables always implement IFn as the first protocol, so we try
       ;; a dispatch to that directly
-      (emit-protocol-call* ctx
+      (gen/emit-protocol-call*
         (emit/bitcast callable emit/ValueP)
         0
         0
         arity
         (map (fn [x] (emit/box (:value x))) args))
       ;; TODO: otherwise accumulate args in last argument and call with arity 8
-      ))
-  ;; in fn:
-  ;;   implement fixed arity call directly when args < 8
-  ;;   if variadic, implement remaining arities accumulating args as list
-  )
+      )))
 
 (defn ^:private builtin? [x]
   (= (:class x) 'torque.core.builtin))

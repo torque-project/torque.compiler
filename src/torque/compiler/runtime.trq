@@ -1,5 +1,6 @@
 (ns torque.compiler.runtime
   (:require
+    [torque.compiler.builtins :as builtin]
     [torque.compiler.emit :as emit]
     [torque.compiler.generators :as gen]))
 
@@ -8,16 +9,8 @@
 (def serializable 45)
 (def pointer      46)
 
-(def binary-type-name "torque_lang_Binary")
-
-(defn binary []
-  (emit/import-type binary-type-name))
-
-(defn binary-type []
-  (emit/find-type binary-type-name))
-
 (defn ^:private binary-to-pointer [type]
-  (->> (emit/define-fun! (str binary-type-name "_IPointerTarget_-intptr_1")
+  (->> (emit/define-fun! (str builtin/binary-type-name "_IPointerTarget_-intptr_1")
          emit/ValueP [(emit/ptr-of type)]
          (fn [fun]
            (emit/force-box (emit/get-field (emit/arg fun 0) 2))))
@@ -26,37 +19,21 @@
 
 (defn ^:private emit-binary-type []
   ;; TODO: implement protocol methods
-  (gen/type binary-type-name
+  (gen/type builtin/binary-type-name
     [{:type emit/int64    :name 'size :field-id 0}
      {:type emit/int8-ptr :name 'data :field-id 1}]
     (fn [type]
-      [(gen/protocol* binary-type-name pointer (binary-to-pointer type))])))
+      [(gen/protocol* builtin/binary-type-name pointer (binary-to-pointer type))])))
 
-(defn ^:private binary-ctor []
-  (emit/declare-ctor! binary-type-name [emit/int64 emit/int8-ptr]))
-
-(defn make-binary
-  ([size]
-   (let [ctor      (binary-ctor)
-         type-size (emit/sizeof (binary-type))
-         ptr       (emit/allocate (emit/add type-size size))]
-     (emit/call ctor [ptr size (emit/advance-ptr ptr size)]))))
-
-(defn bget [b idx]
-  (-> (emit/bitcast b (emit/ptr-of (binary-type)))
-      (emit/get-field 2)
-      (emit/buffer-at idx)))
-
-(defn blength [b]
-  (emit/get-field (emit/bitcast b (emit/ptr-of (binary-type))) 1))
-
-(defn make-string [s]
-  (let [data   (emit/global ".string.literal" (emit/string s))
-        size   (emit/int (count s))
-        space  (emit/allocate (emit/sizeof (binary-type)))
-        binary (emit/call (binary-ctor) [space size data])]
-    (emit/new* "String" [binary (emit/box emit/one) (emit/box size)])))
+(defn ^:private emit-array-type []
+  ;; TODO: implement protocol methods
+  (gen/type builtin/array-type-name
+    [{:type emit/int64  :name 'size :field-id 0}
+     {:type emit/ValueP :name 'data :field-id 1}]
+    (fn [type]
+      [])))
 
 (defn rt0 []
   (emit/with-unit (emit/unit "__torque_rt0")
-    (emit-binary-type)))
+    (emit-binary-type)
+    (emit-array-type)))
