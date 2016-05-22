@@ -5,6 +5,7 @@
     [torque.compiler.generators :as gen]))
 
 (def printable    0)
+(def coll         4)
 (def ifn          43)
 (def serializable 45)
 (def pointer      46)

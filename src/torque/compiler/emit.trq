@@ -294,6 +294,11 @@
    int32
    (ptr-of (fun-type ValueP [ValueP int8-ptr]))])
 
+(def type-num-exts   0)
+(def type-exts       1)
+(def type-num-fields 2)
+(def type-get-field  3)
+
 ;; constant runtime values
 (def nil* (value (const-null (intptr ValueP))))
 (def zero (value (const-int (intptr int32) 0 false)))
@@ -348,7 +353,6 @@
   (value (-load (intptr *builder*) (intptr mutable) name)))
 
 (defn get-field [x idx]
-
   (load (struct-gep (intptr *builder*) (intptr x) idx "") ""))
 
 (defn set-field [inst n val]
@@ -468,7 +472,7 @@
 
 (defn ^:private select-boolean [x]
   (value
-    (-select (intptr *builder*) 
+    (-select (intptr *builder*)
              (intptr x)
              (intptr (true*))
              (intptr (false*))
@@ -695,12 +699,16 @@
       (-> (value-type x)
           (identical (extern "torque_lang_Integer" TypeP)))))
 
+(defn set-global! [global init]
+  (set-init! (intptr global) (if init (intptr init) (intptr nil*)))
+  global)
+
 (defn global
   ([name init]
    (global name (type-of init) init))
   ([name type init]
    (let [g (add-global! (intptr *unit*) (intptr type) name)]
-     (set-init! g (if init (intptr init) nil*))
+     (set-init! g (if init (intptr init) (intptr nil*)))
      (value g))))
 
 (defn putc [ch]
@@ -712,7 +720,7 @@
     x))
 
 (defn print [x]
-  (log "%s\n" (unbox x))
+  (log "PRINT: %s\n" (unbox x))
   nil*)
 
 (defn string [init]

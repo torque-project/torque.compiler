@@ -18,6 +18,12 @@
   sapce compiled so far"
   (atom (a/empty-env)))
 
+(defn throw-not-a-constant-type [ast]
+  (throw
+    (ex-info (str (:type ast) " is not a constant type")
+      {:type (:type ast)
+       :form (:form ast)})))
+
 (defn fun-context [fun]
   {:fun fun :env {:locals {}}})
 
@@ -33,15 +39,36 @@
         (-compile-ast x ctx))
       coll)))
 
+(defn make-vector [values]
+  (let [type     (emit/import-type "torque_lang_vector_PersistentVector")
+        protocol (gen/find-protocol type (emit/int emit/int32 rt/coll))]
+    (reduce
+      (fn [v val]
+        (gen/emit-protocol-call v
+          protocol
+          emit/zero
+          (emit/int emit/int32 2)
+          [v (emit/box (:value val))]))
+      (emit/extern (str "torque_lang_vector_empty") emit/ValueP)
+      values)))
+
 (defmethod -compile-ast :default [ast ctx])
 
 (defmethod -compile-ast :const [ast ctx]
   {:value
-   (cond
-     (= (:type ast) :nil)    emit/nil*
-     (= (:type ast) :bool)   (emit/bool (:val ast))
-     (= (:type ast) :number) (emit/int (:val ast))
-     (= (:type ast) :string) (builtin/make-string (:val ast)))})
+    (cond
+      (= (:type ast) :nil)    emit/nil*
+      (= (:type ast) :bool)   (emit/bool (:val ast))
+      (= (:type ast) :number) (emit/int (:val ast))
+      (= (:type ast) :string) (builtin/make-string (:val ast))
+      (= (:type ast) :symbol) (builtin/make-symbol (:val ast))
+      :else (throw-not-a-constant-type ast))})
+
+(defmethod -compile-ast :vector [ast ctx]
+  {:value (make-vector (compile-all (:items ast) ctx))})
+
+(defmethod -compile-ast :quote [ast ctx]
+  (-compile-ast (:expr ast) ctx))
 
 (defmethod -compile-ast :local [ast ctx]
   {:value
@@ -354,7 +381,9 @@
      ~@body))
 
 (defn eval-ast [ast]
-  (let [name (name (gensym "eval"))
+  ;; (print ast)
+  (let [jit  (jit/singleton)
+        name (name (gensym "eval"))
         unit (emit/unit name)]
     (emit/with-unit unit
       (emit/define-fun! name emit/ValueP []
@@ -363,7 +392,7 @@
               (:value)))))
     (jit/register unit)
     (when-let [addr (jit/resolve-address name)]
-      (invoke* addr :native []))))
+      addr)))
 
 (defn eval [form]
   (binding [trq/*resolver* nil

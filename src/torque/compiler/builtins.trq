@@ -4,6 +4,8 @@
 
 (def binary-type-name "torque_lang_Binary")
 (def array-type-name  "torque_lang_Array")
+(def string-type-name "String")
+(def symbol-type-name "Symbol")
 
 (defn binary []
   (emit/import-type binary-type-name))
@@ -66,4 +68,10 @@
         size   (emit/int (count s))
         space  (emit/allocate (emit/sizeof (binary-type)))
         binary (emit/call (binary-ctor) [space size data])]
-    (emit/new* "String" [binary (emit/box emit/one) (emit/box size)])))
+    (emit/new* string-type-name [binary (emit/box emit/one) (emit/box size)])))
+
+(defn make-symbol [sym]
+  (let [ns   (some-> (namespace sym) (make-string))
+        name (make-string (name sym))
+        fqn  (make-string (str sym))]
+    (emit/new* symbol-type-name [emit/nil* (or ns emit/nil*) name fqn])))

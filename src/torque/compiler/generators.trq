@@ -6,7 +6,7 @@
 (def max-field-length 256)
 
 (defn ^:private load-extensions [type]
-  (emit/get-field type 1))
+  (emit/get-field type emit/type-exts))
 
 (defn ^:private load-extension [extensions id]
   (emit/deref extensions [id emit/one]))
@@ -22,7 +22,7 @@
 (defn ^:private emit-protocol-call* [callable id meth arity args]
   (emit-protocol-call callable
     (load-extension
-      (load-extensions (emit/get-field callable 0))
+      (load-extensions (emit/value-type callable))
       (emit/int emit/int32 id))
     (emit/int emit/int32 meth)
     (emit/int emit/int32 (inc arity))
@@ -30,7 +30,7 @@
 
 (defn find-protocol [type protocol]
   (let [extensions (load-extensions type)
-        size       (emit/get-field type 0)
+        size       (emit/get-field type emit/type-num-exts)
         idx        (emit/mutable-local emit/zero "nexts")]
     (emit/in-block "dispatch"
       (fn [block]
@@ -74,7 +74,7 @@
             (concat (fixed-args fun max-fixed-arity) [arr]))))))
 
 (defn ^:private variadic-forwarders [arities max-fixed-arity]
-  (if (< max-fixed-arity 8)
+  (if (< max-fixed-arity 7)
     (let [start-arity (+ max-fixed-arity 2)]
       (reduce
         (fn [v arity]
@@ -160,19 +160,20 @@
 (defn type [name fields protocol-fn]
   (let [field-types    (map field-type fields)
         instance-type  (emit/define-struct name (vec (cons emit/TypeP field-types)))
+        type           (emit/global name emit/ValueType nil)
         protocols      (protocol-fn instance-type)
         table-size     (emit/int emit/int32 (count protocols))
         protocol-table (emit/bitcast
-                        (emit/global (str name "_entries")
-                                     (emit/array emit/dispatch-entry protocols))
-                        emit/dispatch-table)
+                         (emit/global (str name "_entries")
+                                      (emit/array emit/dispatch-entry protocols))
+                         emit/dispatch-table)
         num-fields     (emit/int emit/int32 (count fields))
-        field-selector (field-selector name instance-type fields)
-        type           (->> (emit/struct emit/ValueType
-                                         [table-size
-                                          protocol-table
-                                          num-fields
-                                          (emit/bitcast field-selector emit/int8-ptr)])
-                            (emit/global name emit/ValueType))]
+        field-selector (field-selector name instance-type fields)]
+    (emit/set-global! type
+      (emit/struct emit/ValueType
+                   [table-size
+                    protocol-table
+                    num-fields
+                    (emit/bitcast field-selector emit/int8-ptr)]))
     (ctor name type instance-type field-types)
     instance-type))
