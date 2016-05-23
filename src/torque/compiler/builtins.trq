@@ -2,10 +2,11 @@
  (:require
    [torque.compiler.emit :as emit]))
 
-(def binary-type-name "torque_lang_Binary")
-(def array-type-name  "torque_lang_Array")
-(def string-type-name "String")
-(def symbol-type-name "Symbol")
+(def binary-type-name  "torque_lang_Binary")
+(def array-type-name   "torque_lang_Array")
+(def string-type-name  "String")
+(def symbol-type-name  "Symbol")
+(def keyword-type-name "Keyword")
 
 (defn binary []
   (emit/import-type binary-type-name))
@@ -75,3 +76,9 @@
         name (make-string (name sym))
         fqn  (make-string (str sym))]
     (emit/new* symbol-type-name [emit/nil* (or ns emit/nil*) name fqn])))
+
+(defn make-keyword [sym]
+  (let [ns   (some-> (namespace sym) (make-string))
+        name (make-string (name sym))
+        fqn  (make-string (str sym))]
+    (emit/new* keyword-type-name [emit/nil* (or ns emit/nil*) name fqn])))

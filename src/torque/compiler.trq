@@ -52,20 +52,39 @@
       (emit/extern (str "torque_lang_vector_empty") emit/ValueP)
       values)))
 
+(defn make-map [kvs]
+  (let [type     (emit/import-type "torque_lang_map_PersistentArrayMap")
+        protocol (gen/find-protocol type (emit/int emit/int32 rt/associative))]
+    (reduce
+     (fn [m kv]
+       (gen/emit-protocol-call m
+         protocol
+         emit/zero
+         (emit/int emit/int32 2)
+         [m (emit/box (:value (first kv)) (:value (second kv)))]))
+     (emit/extern (str "torque_lang_map_empty") emit/ValueP)
+     kvs)))
+
 (defmethod -compile-ast :default [ast ctx])
 
 (defmethod -compile-ast :const [ast ctx]
   {:value
     (cond
-      (= (:type ast) :nil)    emit/nil*
-      (= (:type ast) :bool)   (emit/bool (:val ast))
-      (= (:type ast) :number) (emit/int (:val ast))
-      (= (:type ast) :string) (builtin/make-string (:val ast))
-      (= (:type ast) :symbol) (builtin/make-symbol (:val ast))
+      (= (:type ast) :nil)     emit/nil*
+      (= (:type ast) :bool)    (emit/bool (:val ast))
+      (= (:type ast) :number)  (emit/int (:val ast))
+      (= (:type ast) :string)  (builtin/make-string (:val ast))
+      (= (:type ast) :symbol)  (builtin/make-symbol (:val ast))
+      (= (:type ast) :keyword) (builtin/make-keyword (:val ast))
       :else (throw-not-a-constant-type ast))})
 
 (defmethod -compile-ast :vector [ast ctx]
   {:value (make-vector (compile-all (:items ast) ctx))})
+
+(defmethod -compile-ast :map [ast ctx]
+  (let [ks (compile-all (:keys ast) ctx)
+        vs (compile-all (:vals ast) ctx)]
+    {:value (make-map (map vector ks vs))}))
 
 (defmethod -compile-ast :quote [ast ctx]
   (-compile-ast (:expr ast) ctx))
@@ -381,7 +400,7 @@
      ~@body))
 
 (defn eval-ast [ast]
-  ;; (print ast)
+  (print (dissoc ast :env))
   (let [jit  (jit/singleton)
         name (name (gensym "eval"))
         unit (emit/unit name)]

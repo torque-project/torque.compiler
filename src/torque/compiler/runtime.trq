@@ -6,6 +6,7 @@
 
 (def printable    0)
 (def coll         4)
+(def associative  9)
 (def ifn          43)
 (def serializable 45)
 (def pointer      46)
