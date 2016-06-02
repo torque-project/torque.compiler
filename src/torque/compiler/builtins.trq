@@ -47,7 +47,9 @@
          type-size (emit/sizeof (array-type))
          size      (emit/add type-size (emit/mul count emit/pointer-size))
          ptr       (emit/allocate (emit/add type-size size))
-         array     (emit/bitcast (emit/advance-ptr ptr size) emit/ValueP)]
+         array     (emit/bitcast
+                     (emit/advance-ptr ptr size)
+                     (emit/ptr-of emit/ValueP))]
      (emit/call ctor [ptr count array]))))
 
 (defn aget [a idx]

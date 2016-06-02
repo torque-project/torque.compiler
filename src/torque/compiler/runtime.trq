@@ -22,7 +22,7 @@
 (defn ^:private emit-binary-type []
   ;; TODO: implement protocol methods
   (gen/type builtin/binary-type-name
-    [{:type emit/int64    :name 'size :field-id 0}
+    [{:type emit/int64 :name 'size :field-id 0}
      {:type emit/int8-ptr :name 'data :field-id 1}]
     (fn [type]
       [(gen/protocol* builtin/binary-type-name pointer (binary-to-pointer type))])))
@@ -30,8 +30,8 @@
 (defn ^:private emit-array-type []
   ;; TODO: implement protocol methods
   (gen/type builtin/array-type-name
-    [{:type emit/int64  :name 'size :field-id 0}
-     {:type emit/ValueP :name 'data :field-id 1}]
+    [{:type emit/int64 :name 'size :field-id 0}
+     {:type (emit/ptr-of emit/ValueP) :name 'data :field-id 1}]
     (fn [type]
       [])))
 

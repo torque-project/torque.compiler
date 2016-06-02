@@ -18,6 +18,11 @@
   sapce compiled so far"
   (atom (a/empty-env)))
 
+(defn throw-not-a-constant [val]
+  (throw
+    (ex-info (str val " is not a constant value")
+      {:value val})))
+
 (defn throw-not-a-constant-type [ast]
   (throw
     (ex-info (str (:type ast) " is not a constant type")
@@ -56,16 +61,30 @@
   (let [type     (emit/import-type "torque_lang_map_PersistentArrayMap")
         protocol (gen/find-protocol type (emit/int emit/int32 rt/associative))]
     (reduce
-     (fn [m kv]
-       (gen/emit-protocol-call m
-         protocol
-         emit/zero
-         (emit/int emit/int32 2)
-         [m (emit/box (:value (first kv)) (:value (second kv)))]))
-     (emit/extern (str "torque_lang_map_empty") emit/ValueP)
-     kvs)))
+      (fn [m kv]
+        (gen/emit-protocol-call m
+          protocol
+          emit/zero
+          (emit/int emit/int32 2)
+          [m
+           (emit/box (:value (first kv)))
+           (emit/box (:value (second kv)))]))
+      (emit/extern (str "torque_lang_map_empty") emit/ValueP)
+      kvs)))
 
-(defmethod -compile-ast :default [ast ctx])
+(defn make-const [val]
+  (cond
+    (nil? val)     emit/nil*
+    (boolean? val) (emit/bool val)
+    (integer? val) (emit/int val)
+    (string? val)  (builtin/make-string val)
+    (symbol? val)  (builtin/make-symbol val)
+    (keyword? val) (builtin/make-keyword val)
+    (vector? val)  (make-vector (map make-const val))
+    :else (throw-not-a-constant val)))
+
+(defmethod -compile-ast :default [ast ctx]
+  (throw (ex-info "Unknown operation" {:op (:op ast) :ast ast})))
 
 (defmethod -compile-ast :const [ast ctx]
   {:value
@@ -76,6 +95,7 @@
       (= (:type ast) :string)  (builtin/make-string (:val ast))
       (= (:type ast) :symbol)  (builtin/make-symbol (:val ast))
       (= (:type ast) :keyword) (builtin/make-keyword (:val ast))
+      (= (:type ast) :vector)  (make-const (:val ast))
       :else (throw-not-a-constant-type ast))})
 
 (defmethod -compile-ast :vector [ast ctx]
@@ -177,27 +197,50 @@
 (defn ^:private add-fn-frame [methods ctx]
   (map (fn [meth]
          (update-in meth [:params]
-                    (fn [params]
-                      (cons {:name 'frame
-                             :arg-id 0
-                             :type (emit/ptr-of (:frame ctx))}
-                            (map (fn [param]
-                                   (update param :arg-id inc))
-                                 params)))))
+           (fn [params]
+             (cons {:name   'frame
+                    :arg-id 0
+                    :type   (emit/ptr-of (:frame ctx))}
+                   (map (fn [param]
+                          (update param :arg-id inc))
+                        params)))))
        methods))
+
+(defn ^:private closed-over-types [ast]
+  (map
+   (fn [sym id]
+     {:type     emit/ValueP
+      :field-id id
+      :name     sym})
+   (:closing-over ast)
+   (iterate inc 0)))
+
+(defn ^:private emit-closed-overs [parent-ctx ctx]
+  (reduce
+    (fn [ctx [sym id]]
+      (assoc-in ctx [:env :locals sym]
+        (emit/get-field (emit/arg (:fun ctx) 0) (inc id))))
+    ctx
+    (map vector (:closed-overs parent-ctx) (iterate inc 0))))
 
 (defmethod -compile-ast :fn [ast ctx]
   (let [name      (name (or (:name ast) (gensym "fn")))
         qname     name ;; (str (:ns @*compiler-env*) "_" name)
         max-arity (:max-fixed-arity ast)
-        type      (gen/type qname []
+        fields    (closed-over-types ast)
+        meth-ctx  (assoc ctx :closed-overs (vec (:closing-over ast)))
+        type      (gen/type qname fields
                     (fn [type]
-                      (let [ctx   (call-frame ctx qname type)
-                            meths (add-fn-frame (:methods ast) ctx)]
-                        (->> (compile-all meths ctx)
+                      (let [meth-ctx (call-frame meth-ctx qname type)
+                            meths    (add-fn-frame (:methods ast) meth-ctx)]
+                        (->> (compile-all meths meth-ctx)
                              (gen/protocol* qname rt/ifn)
-                             (list)))))]
-    {:value (emit/new* qname [])}))
+                             (list)))))
+        enclosed  (mapv
+                    (fn [x]
+                      (-> ctx :env :locals (get x)))
+                    (:closing-over ast))]
+    {:value (emit/new* qname (map emit/box enclosed))}))
 
 (defn ^:private emit-params [ast ctx]
   (reduce
@@ -232,6 +275,7 @@
          (->> (fun-context fun)
               (emit-fn-local ast)
               (emit-params ast)
+              (emit-closed-overs ctx)
               (-compile-ast (:body ast))
               :value)))}))
 
@@ -300,10 +344,18 @@
 
 (defmethod -compile-ast :type-field [ast ctx]
   (let [val       (:value (-compile-ast (:target ast) ctx))
-        type (emit/get-field val 0)
+        type      (emit/get-field val 0)
         field-fun (emit/get-field type 3)
         s (emit/global ".field" (emit/string (name (:field ast))))]
     {:value (emit/call field-fun [val s])}))
+
+(defmethod -compile-ast :set! [ast ctx]
+  (let [target (:value (-compile-ast (:target ast) ctx))
+        val    (:value (-compile-ast (:val ast) ctx))
+        setter (emit/get-field (emit/value-type target) emit/type-set-field)
+        s      (emit/global ".field" (emit/string (name (:field ast))))]
+    (emit/call setter [target s (emit/box val)])
+    {:value emit/nil*}))
 
 (defmethod -compile-ast :new [ast ctx]
   {:value
@@ -319,12 +371,16 @@
     {:value (emit/bitcast instance emit/ValueP)}))
 
 (defmethod -compile-ast :def [ast ctx]
-  (let [n     (:name ast)
-        init  (:init ast)
-        global (emit/global (name n) emit/nil*)
-        value (some-> init (-compile-ast ctx))]
-    (emit/store global (and value (emit/box (:value value))))
-    (or value {:value emit/nil*})))
+  (let [n      (name (:name ast))
+        init   (:init ast)
+        global (if (jit/resolve-address n)
+                 (emit/extern n emit/ValueP)
+                 (or (emit/find-global n) (emit/global n emit/nil*)))
+        value  (some-> init (-compile-ast ctx))]
+    (when value
+      (emit/store global (and value (emit/box (:value value))))
+      value)
+    {:value emit/nil*}))
 
 (defn ^:private emit-instrinsic*
   ([op ctx x]
@@ -400,7 +456,7 @@
      ~@body))
 
 (defn eval-ast [ast]
-  (print (dissoc ast :env))
+  ;; (print ast)
   (let [jit  (jit/singleton)
         name (name (gensym "eval"))
         unit (emit/unit name)]
@@ -411,7 +467,7 @@
               (:value)))))
     (jit/register unit)
     (when-let [addr (jit/resolve-address name)]
-      addr)))
+      (invoke* addr :native []))))
 
 (defn eval [form]
   (binding [trq/*resolver* nil

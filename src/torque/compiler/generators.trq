@@ -131,7 +131,7 @@
           (emit/box (emit/get-field this (inc (:field-id field))))
           emit/nil*)))))
 
-(defn field-selector [name type fields]
+(defn field-getter [name type fields]
   (let [strcmp (import-strcmp)
         name   (str name "_get_field")]
     (emit/define-fun! name emit/ValueP
@@ -141,6 +141,34 @@
               str         (emit/arg fun 1)
               field-tests (map (compare-field this str strcmp) fields)]
           (emit/cond* emit/ValueP field-tests (fn [] emit/nil*)))))))
+
+(defn set-field [this field val]
+  (fn []
+    (emit/set-field this (inc (:field-id field)) val)
+    emit/nil*))
+
+(defn field-setter [name type fields]
+  (let [strcmp (import-strcmp)
+        name   (str name "_set_field")]
+    (emit/define-fun! name emit/ValueP
+      [(emit/ptr-of type) emit/int8-ptr emit/ValueP]
+      (fn [fun]
+        (let [this       (emit/arg fun 0)
+              str        (emit/arg fun 1)
+              val        (emit/arg fun 2)
+              comparator (compare-field this str strcmp)
+              conditions (reduce
+                           (fn [prev field]
+                             (if (emit/value? (:type field emit/ValueP))
+                               (fn []
+                                 (emit/if*
+                                   (comparator field)
+                                   (set-field this field val)
+                                   prev))
+                               prev))
+                           (fn [] emit/nil*)
+                           fields)]
+          (conditions))))))
 
 (defn ctor [name type instance-struct field-types]
   (emit/define-fun! (str name "_new") emit/ValueP (cons emit/int8-ptr field-types)
@@ -168,12 +196,14 @@
                                       (emit/array emit/dispatch-entry protocols))
                          emit/dispatch-table)
         num-fields     (emit/int emit/int32 (count fields))
-        field-selector (field-selector name instance-type fields)]
+        field-getter   (field-getter name instance-type fields)
+        field-setter   (field-setter name instance-type fields)]
     (emit/set-global! type
       (emit/struct emit/ValueType
                    [table-size
                     protocol-table
                     num-fields
-                    (emit/bitcast field-selector emit/int8-ptr)]))
+                    (emit/bitcast field-getter emit/int8-ptr)
+                    (emit/bitcast field-setter emit/int8-ptr)]))
     (ctor name type instance-type field-types)
     instance-type))
