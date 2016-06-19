@@ -12,7 +12,8 @@
 (def pointer      46)
 
 (defn ^:private binary-to-pointer [type]
-  (->> (emit/define-fun! (str builtin/binary-type-name "_IPointerTarget_-intptr_1")
+  (->> (emit/define-fun!
+         (emit/mangle-method builtin/binary-type-name "IPointerTarget" "-intptr" 1)
          emit/ValueP [(emit/ptr-of type)]
          (fn [fun]
            (emit/force-box (emit/get-field (emit/arg fun 0) 2))))

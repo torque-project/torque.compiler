@@ -383,6 +383,9 @@
     (str name "_variadic")
     (str name "_" (:fixed-arity fn))))
 
+(defn mangle-method [type protocol meth arity]
+  (str type "_" protocol "_" meth "_" arity))
+
 (defn declare-fun!
  ([name ret args]
   (declare-fun! name ret args false))
@@ -694,7 +697,7 @@
     (identical (box a) (box b))))
 
 (defn import-type [name]
-  (extern name ValueType))
+  (load (extern name TypeP) ""))
 
 (defn instance-of [type x]
   (cmp eq type (value-type x)))

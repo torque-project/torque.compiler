@@ -10,7 +10,7 @@
 
 (ffi/defimport dispose-message llvm LLVMDisposeMessage :void [:ptr])
 
-(def max-message-length 4096)
+(def max-message-length (* 8 4996))
 
 (deftype Message [p]
   IPrintable

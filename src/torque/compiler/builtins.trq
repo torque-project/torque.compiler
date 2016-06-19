@@ -80,7 +80,11 @@
     (emit/new* symbol-type-name [emit/nil* (or ns emit/nil*) name fqn])))
 
 (defn make-keyword [sym]
-  (let [ns   (some-> (namespace sym) (make-string))
-        name (make-string (name sym))
-        fqn  (make-string (str sym))]
-    (emit/new* keyword-type-name [emit/nil* (or ns emit/nil*) name fqn])))
+  (print sym)
+  (let [ns  (some-> (namespace sym) (make-string))
+        _ (println "TEST")
+        n   (make-string (name sym))
+        _ (print "TEST")
+        fqn (make-string (str sym))]
+    (print "TEST")
+    (emit/new* keyword-type-name [emit/nil* (or ns emit/nil*) n fqn])))

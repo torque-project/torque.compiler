@@ -44,33 +44,46 @@
         (-compile-ast x ctx))
       coll)))
 
+(defn ^:private empty-coll [t]
+  (-> (str "torque_lang_" t "_empty")
+      (emit/extern emit/ValueP)
+      (emit/load (str "empty_" t))))
+
 (defn make-vector [values]
-  (let [type     (emit/import-type "torque_lang_vector_PersistentVector")
-        protocol (gen/find-protocol type (emit/int emit/int32 rt/coll))]
-    (reduce
-      (fn [v val]
-        (gen/emit-protocol-call v
-          protocol
-          emit/zero
-          (emit/int emit/int32 2)
-          [v (emit/box (:value val))]))
-      (emit/extern (str "torque_lang_vector_empty") emit/ValueP)
-      values)))
+  (let [empty-vector (empty-coll "vector")]
+    (if (empty? values)
+      empty-vector
+      (let [type     (emit/import-type "torque_lang_vector_PersistentVector")
+            protocol (gen/find-protocol type (emit/int emit/int32 rt/coll))]
+        (reduce
+          (fn [v val]
+            (gen/emit-protocol-call v
+              protocol
+              emit/zero
+              (emit/int emit/int32 2)
+              [v (emit/box (:value val))]))
+         empty-vector
+         values)))))
 
 (defn make-map [kvs]
-  (let [type     (emit/import-type "torque_lang_map_PersistentArrayMap")
-        protocol (gen/find-protocol type (emit/int emit/int32 rt/associative))]
-    (reduce
-      (fn [m kv]
-        (gen/emit-protocol-call m
-          protocol
-          emit/zero
-          (emit/int emit/int32 2)
-          [m
-           (emit/box (:value (first kv)))
-           (emit/box (:value (second kv)))]))
-      (emit/extern (str "torque_lang_map_empty") emit/ValueP)
-      kvs)))
+  ;; (print "MAP")
+  (let [empty-map (empty-coll "map")]
+    (if (empty? kvs)
+      empty-map
+      (let [type     (emit/import-type "torque_lang_map_PersistentArrayMap")
+            protocol (gen/find-protocol type (emit/int emit/int32 rt/associative))]
+        (reduce
+          (fn [m kv]
+            ;; (print "ASSOC")
+            (gen/emit-protocol-call m
+              protocol
+              emit/zero
+              (emit/int emit/int32 2)
+              [m
+               (emit/box (:value (first kv)))
+               (emit/box (:value (second kv)))]))
+          empty-map
+          kvs)))))
 
 (defn make-const [val]
   (cond
@@ -84,6 +97,8 @@
     :else (throw-not-a-constant val)))
 
 (defmethod -compile-ast :default [ast ctx]
+  (print "DEFAULT")
+  (print (:form ast))
   (throw (ex-info "Unknown operation" {:op (:op ast) :ast ast})))
 
 (defmethod -compile-ast :const [ast ctx]
@@ -102,8 +117,11 @@
   {:value (make-vector (compile-all (:items ast) ctx))})
 
 (defmethod -compile-ast :map [ast ctx]
+  ;; (println "MAPC")
   (let [ks (compile-all (:keys ast) ctx)
+        ;; _ (print "X")
         vs (compile-all (:vals ast) ctx)]
+    ;; (print "Y")
     {:value (make-map (map vector ks vs))}))
 
 (defmethod -compile-ast :quote [ast ctx]
@@ -255,14 +273,14 @@
 (defn ^:private emit-fn-local [ast ctx]
   (if (:local ast)
     (->> (emit/arg (:fun ctx) 0)
-         (assoc-in ctx [:locals (:name (:local ast))]))
+         (assoc-in ctx [:env :locals (:name (:local ast))]))
     ctx))
 
 (defn ^:private arg-types [ast ctx]
-  (let [args (map (fn [x] (:type x emit/ValueP)) (:params ast))]
+  (let [args (mapv (fn [x] (:type x emit/ValueP)) (:params ast))]
     (if (:variadic? ast)
       ;; add one extra arg in case of a variadic fn
-      (cons emit/ValueP args)
+      (conj args emit/ValueP)
       args)))
 
 (defmethod -compile-ast :fn-method [ast ctx]

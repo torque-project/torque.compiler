@@ -57,42 +57,50 @@
 (defn ^:private mangle-forwarder [arity max-fixed-arity]
   (str "__rest_arg_forwarder_" arity "_" max-fixed-arity))
 
-(defn ^:private variadic-forwarder [arity max-fixed-arity]
+(defn ^:private variadic-forwarder [arity impl max-fixed-arity]
   (emit/define-fun! (mangle-forwarder arity max-fixed-arity)
-       {:link :once}
-       emit/ValueP (vec (repeat (inc arity) emit/ValueP))
-       (fn [fun]
-         ;; accumulate args and call rest arg arity
-         (let [count (- arity max-fixed-arity)
-               arr   (builtin/make-array (emit/int arity))]
-           (dotimes [n count]
-             (builtin/aset arr (emit/int n) (emit/fn-arg fun n)))
-           ;; call thru to actual impl
-           (emit-protocol-call*
-            (emit/arg fun 0)
-            0 0 max-fixed-arity
-            (concat (fixed-args fun max-fixed-arity) [arr]))))))
+    {:link :once}
+    emit/ValueP (vec (repeat (inc arity) emit/ValueP))
+    (fn [fun]
+      ;; accumulate args and call rest arg arity
+      (let [count (dec (- arity max-fixed-arity))
+            rargs (if (> count 0)
+                    (builtin/make-array (emit/int count))
+                    emit/nil*)]
+        (when rargs
+          (dotimes [n count]
+            (let [idx (+ max-fixed-arity n)]
+              (builtin/aset rargs (emit/int n) (emit/fn-arg fun idx)))))
+        ;; call thru to actual implementation
+        (->> (concat (fixed-args fun max-fixed-arity) [rargs])
+             (cons (emit/arg fun 0))
+             (emit/call impl))))))
 
-(defn ^:private variadic-forwarders [arities max-fixed-arity]
+(defn ^:private variadic-forwarders [arities impl max-fixed-arity]
   (if (< max-fixed-arity 7)
-    (let [start-arity (+ max-fixed-arity 2)]
+    (let [start-arity (+ max-fixed-arity 1)]
       (reduce
-        (fn [v arity]
-          (->> (-> (variadic-forwarder arity max-fixed-arity)
-                   (emit/value)
-                   (emit/bitcast emit/int8-ptr))
-               (assoc v arity)))
+       (fn [v arity]
+         ;; implement a forwarder to the variadic implementation
+         ;; only if there is no fixed arity implementation. this
+         ;; correctly dispatches the case:
+         ;; (fn ([x] ...) ([x & xs] ...))
+         (if (= (get v arity) emit/nil*)
+           (->> (-> (variadic-forwarder arity impl max-fixed-arity)
+                    (emit/value)
+                    (emit/bitcast emit/int8-ptr))
+                (assoc v arity))
+           v))
         arities
         (take (- 8 start-arity) (iterate inc start-arity))))))
 
 (defn ^:private protocol-meth [arities]
   (->> (reduce
          (fn [v impl]
-           (let [fun-ptr (emit/bitcast (:value impl) emit/int8-ptr)
-                 out     (assoc v (inc (:arity impl)) fun-ptr)]
+           (let [fun-ptr (emit/bitcast (:value impl) emit/int8-ptr)]
              (if (:variadic? impl)
-               (variadic-forwarders out (:arity impl))
-               out)))
+               (variadic-forwarders v (:value impl) (:arity impl))
+               (assoc v (inc (:arity impl)) fun-ptr))))
          (vec (replicate 8 emit/nil*))
          arities)
        (emit/array emit/int8-ptr)
@@ -123,13 +131,17 @@
 (defn compare-field [this str strcmp]
   (fn [field]
     (let [field-name (emit/global ".field" (emit/string (name (:name field))))]
-      (fn []
-        (emit/select
-          (->> [field-name str (emit/int max-field-length)]
-               (emit/call strcmp)
-               (emit/cmp emit/eq emit/zero))
-          (emit/box (emit/get-field this (inc (:field-id field))))
-          emit/nil*)))))
+      (->> [field-name str (emit/int max-field-length)]
+           (emit/call strcmp)
+           (emit/cmp emit/eq emit/zero)))))
+
+(defn get-field [this comparator]
+  (fn [field]
+    (fn []
+      (emit/select
+       (comparator field)
+       (emit/box (emit/get-field this (inc (:field-id field))))
+       emit/nil*))))
 
 (defn field-getter [name type fields]
   (let [strcmp (import-strcmp)
@@ -139,7 +151,8 @@
       (fn [fun]
         (let [this        (emit/arg fun 0)
               str         (emit/arg fun 1)
-              field-tests (map (compare-field this str strcmp) fields)]
+              getter      (get-field this (compare-field this str strcmp))
+              field-tests (mapv getter fields)]
           (emit/cond* emit/ValueP field-tests (fn [] emit/nil*)))))))
 
 (defn set-field [this field val]
@@ -162,7 +175,7 @@
                              (if (emit/value? (:type field emit/ValueP))
                                (fn []
                                  (emit/if*
-                                   (comparator field)
+                                   (fn [] (comparator field))
                                    (set-field this field val)
                                    prev))
                                prev))
@@ -188,7 +201,8 @@
 (defn type [name fields protocol-fn]
   (let [field-types    (map field-type fields)
         instance-type  (emit/define-struct name (vec (cons emit/TypeP field-types)))
-        type           (emit/global name emit/ValueType nil)
+        type           (emit/global (str name "_static") emit/ValueType nil)
+        type-ref       (emit/global name emit/ValueP type)
         protocols      (protocol-fn instance-type)
         table-size     (emit/int emit/int32 (count protocols))
         protocol-table (emit/bitcast
