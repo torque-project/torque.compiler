@@ -4,6 +4,7 @@
   (:require
     [torque.analyzer :as a]
     [torque.analyzer.env :as env]
+    [torque.analyzer.utils :as u]
     [torque.analyzer.torque :as trq]
     [torque.analyzer.resolver :as r]
     [torque.compiler.builtins :as builtin]
@@ -49,36 +50,43 @@
       (emit/extern emit/ValueP)
       (emit/load (str "empty_" t))))
 
+(defn into-coll
+  [type values empty-coll]
+  (if (empty? values)
+    empty-coll
+    (let [protocol (gen/find-protocol type (emit/int emit/int32 rt/coll))]
+      (reduce
+       (fn [v val]
+         (gen/emit-protocol-call v
+           protocol
+           emit/zero
+           (emit/int emit/int32 2)
+           [v (emit/box (:value val))]))
+       empty-coll
+       values))))
+
 (defn make-vector [values]
-  (let [empty-vector (empty-coll "vector")]
-    (if (empty? values)
-      empty-vector
-      (let [type     (emit/import-type "torque_lang_vector_PersistentVector")
-            protocol (gen/find-protocol type (emit/int emit/int32 rt/coll))]
-        (reduce
-          (fn [v val]
-            (gen/emit-protocol-call v
-              protocol
-              emit/zero
-              (emit/int emit/int32 2)
-              [v (emit/box (:value val))]))
-         empty-vector
-         values)))))
+  (let [empty-vector (empty-coll "vector")
+        type         (builtin/vector)]
+    (into-coll type values empty-vector)))
+
+(defn make-set [values]
+  (let [empty-set (empty-coll "set")
+        type      (builtin/set)]
+    (into-coll type values empty-set)))
 
 (defn make-map [kvs]
-  ;; (print "MAP")
   (let [empty-map (empty-coll "map")]
     (if (empty? kvs)
       empty-map
-      (let [type     (emit/import-type "torque_lang_map_PersistentArrayMap")
+      (let [type     (emit/import-type builtin/map-type-name)
             protocol (gen/find-protocol type (emit/int emit/int32 rt/associative))]
         (reduce
           (fn [m kv]
-            ;; (print "ASSOC")
             (gen/emit-protocol-call m
               protocol
-              emit/zero
-              (emit/int emit/int32 2)
+              emit/one
+              (emit/int emit/int32 3)
               [m
                (emit/box (:value (first kv)))
                (emit/box (:value (second kv)))]))
@@ -94,6 +102,7 @@
     (symbol? val)  (builtin/make-symbol val)
     (keyword? val) (builtin/make-keyword val)
     (vector? val)  (make-vector (map make-const val))
+    (set? val)     (make-set (map make-const val))
     :else (throw-not-a-constant val)))
 
 (defmethod -compile-ast :default [ast ctx]
@@ -111,17 +120,18 @@
       (= (:type ast) :symbol)  (builtin/make-symbol (:val ast))
       (= (:type ast) :keyword) (builtin/make-keyword (:val ast))
       (= (:type ast) :vector)  (make-const (:val ast))
+      (= (:type ast) :set)     (make-const (:val ast))
       :else (throw-not-a-constant-type ast))})
 
 (defmethod -compile-ast :vector [ast ctx]
-  {:value (make-vector (compile-all (:items ast) ctx))})
+  {:value (-> (compile-all (:items ast) ctx) make-vector)})
+
+(defmethod -compile-ast :set [ast ctx]
+  {:value (-> (compile-all (:items ast) ctx) make-set)})
 
 (defmethod -compile-ast :map [ast ctx]
-  ;; (println "MAPC")
   (let [ks (compile-all (:keys ast) ctx)
-        ;; _ (print "X")
         vs (compile-all (:vals ast) ctx)]
-    ;; (print "Y")
     {:value (make-map (map vector ks vs))}))
 
 (defmethod -compile-ast :quote [ast ctx]
@@ -455,7 +465,7 @@
         arity
         (map (fn [x] (emit/box (:value x))) args))
       ;; TODO: otherwise accumulate args in last argument and call with arity 8
-      )))
+      emit/nil*)))
 
 (defn ^:private builtin? [x]
   (= (:class x) 'torque.core.builtin))

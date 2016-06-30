@@ -7,6 +7,9 @@
 (def string-type-name  "String")
 (def symbol-type-name  "Symbol")
 (def keyword-type-name "Keyword")
+(def vector-type-name  "torque_lang_vector_PersistentVector")
+(def set-type-name     "torque_lang_set_PersistentHashSet")
+(def map-type-name     "torque_lang_map_PersistentArrayMap")
 
 (defn binary []
   (emit/import-type binary-type-name))
@@ -22,6 +25,12 @@
 
 (defn ^:private binary-ctor []
   (emit/declare-ctor! binary-type-name [emit/int64 emit/int8-ptr]))
+
+(defn vector []
+  (emit/import-type vector-type-name))
+
+(defn set []
+  (emit/import-type set-type-name))
 
 (defn make-binary
   ([size]
@@ -80,11 +89,7 @@
     (emit/new* symbol-type-name [emit/nil* (or ns emit/nil*) name fqn])))
 
 (defn make-keyword [sym]
-  (print sym)
   (let [ns  (some-> (namespace sym) (make-string))
-        _ (println "TEST")
         n   (make-string (name sym))
-        _ (print "TEST")
         fqn (make-string (str sym))]
-    (print "TEST")
     (emit/new* keyword-type-name [emit/nil* (or ns emit/nil*) n fqn])))
