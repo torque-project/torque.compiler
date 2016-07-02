@@ -3,7 +3,8 @@
 (ns torque.compiler.emit
   (:require
     [torque.compiler.util :as util]
-    [torque.ffi :as ffi]))
+    [torque.ffi :as ffi]
+    [torque.string :as str]))
 
 (def ^:private llvm (ffi/so "LLVM"))
 
@@ -377,6 +378,12 @@
    (value (const-cast (intptr val) (intptr type))))
   ([val type]
    (value (-bitcast (intptr *builder*) (intptr val) (intptr type) ""))))
+
+(defn mangle-ns [ns]
+  (str/replace (name ns) "." "_"))
+
+(defn mangle-var [var]
+  (str (mangle-ns (:ns var)) "_" (:name var)))
 
 (defn mangle [name fn]
   (if (:variadic? fn)

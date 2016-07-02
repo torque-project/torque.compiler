@@ -4,9 +4,9 @@
 
 (def binary-type-name  "torque_lang_Binary")
 (def array-type-name   "torque_lang_Array")
-(def string-type-name  "String")
-(def symbol-type-name  "Symbol")
-(def keyword-type-name "Keyword")
+(def string-type-name  "torque_lang_string_String")
+(def symbol-type-name  "torque_lang_symbol_Symbol")
+(def keyword-type-name "torque_lang_keyword_Keyword")
 (def vector-type-name  "torque_lang_vector_PersistentVector")
 (def set-type-name     "torque_lang_set_PersistentHashSet")
 (def map-type-name     "torque_lang_map_PersistentArrayMap")

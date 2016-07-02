@@ -146,7 +146,7 @@
        (-> ctx :env :locals (get (:name ast))))})
 
 (defmethod -compile-ast :var [ast ctx]
-  (let [name (name (-> ast :var :name))]
+  (let [name (emit/mangle-var (:var ast))]
     {:value (emit/load (emit/extern name emit/ValueP) name)}))
 
 (defmethod -compile-ast :do [ast ctx]
@@ -252,8 +252,7 @@
     (map vector (:closed-overs parent-ctx) (iterate inc 0))))
 
 (defmethod -compile-ast :fn [ast ctx]
-  (let [name      (name (or (:name ast) (gensym "fn")))
-        qname     name ;; (str (:ns @*compiler-env*) "_" name)
+  (let [qname     (str (:tag ctx) "_" (or (:name ast) (gensym "fn")))
         max-arity (:max-fixed-arity ast)
         fields    (closed-over-types ast)
         meth-ctx  (assoc ctx :closed-overs (vec (:closing-over ast)))
@@ -363,11 +362,11 @@
     extensions))
 
 (defmethod -compile-ast :deftype [ast ctx]
-  (let [name (name (:name ast))
-        type (gen/type name (:fields ast)
-               (fn [type]
-                 (->> (assoc ctx :frame type)
-                      (compile-extensions name (:extensions ast)))))]
+  (let [qname (str (:tag ctx) "_" (:name ast))
+        type  (gen/type qname (:fields ast)
+                (fn [type]
+                  (->> (assoc ctx :frame type)
+                       (compile-extensions qname (:extensions ast)))))]
     {:value emit/nil*}))
 
 (defmethod -compile-ast :type-field [ast ctx]
@@ -388,22 +387,22 @@
 (defmethod -compile-ast :new [ast ctx]
   {:value
    (emit/new*
-     (name (-> ast :class :var :name))
+     (emit/mangle-var (-> ast :class :var))
      (map (fn [x] (emit/box (:value x))) (compile-all (:args ast) ctx)))})
 
 (defmethod -compile-ast :protocol [ast ctx]
-  (let [name     (str (name (:name ast)) "_protocol")
+  (let [name     (str (:tag ctx) "_" (name (:name ast)) "_protocol")
         instance (->> [(emit/null emit/TypeP) (emit/int emit/int32 (:id ast))]
                       (emit/struct emit/Protocol)
                       (emit/global name))]
     {:value (emit/bitcast instance emit/ValueP)}))
 
 (defmethod -compile-ast :def [ast ctx]
-  (let [n      (name (:name ast))
+  (let [qname  (emit/mangle-var (:var ast))
         init   (:init ast)
-        global (if (jit/resolve-address n)
-                 (emit/extern n emit/ValueP)
-                 (or (emit/find-global n) (emit/global n emit/nil*)))
+        global (if (jit/resolve-address qname)
+                 (emit/extern qname emit/ValueP)
+                 (or (emit/find-global qname) (emit/global qname emit/nil*)))
         value  (some-> init (-compile-ast ctx))]
     (when value
       (emit/store global (and value (emit/box (:value value))))
@@ -491,8 +490,10 @@
     (emit/with-unit unit
       (emit/define-fun! name emit/ValueP []
         (fn [f]
-          (-> (compile-ast ast (fun-context f))
-              (:value)))))
+          (let [tag (emit/mangle-ns (:ns @*compiler-env*))]
+            (->> (assoc (fun-context f) :tag tag)
+                 (compile-ast ast)
+                 (:value))))))
     (jit/register unit)
     (when-let [addr (jit/resolve-address name)]
       (invoke* addr :native []))))
