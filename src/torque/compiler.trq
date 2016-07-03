@@ -299,10 +299,10 @@
      :value
      (emit/define-fun! name emit/ValueP (arg-types ast ctx)
        (fn [fun]
-         (->> (fun-context fun)
+         (->> (assoc (fun-context fun) :tag (:tag ctx))
               (emit-fn-local ast)
-              (emit-params ast)
               (emit-closed-overs ctx)
+              (emit-params ast)
               (-compile-ast (:body ast))
               :value)))}))
 
