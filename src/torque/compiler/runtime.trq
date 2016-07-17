@@ -5,8 +5,10 @@
     [torque.compiler.generators :as gen]))
 
 (def printable    0)
+(def counted      2)
 (def coll         4)
 (def associative  9)
+(def equiv        21)
 (def ifn          43)
 (def serializable 45)
 (def pointer      46)
@@ -20,13 +22,30 @@
        (hash-map :arity 0 :value)
        (list)))
 
+(defn ^:private binary-size [type]
+  (->> (emit/define-fun!
+         (emit/mangle-method builtin/binary-type-name "ICounted" "-count" 1)
+         emit/ValueP [(emit/ptr-of type)]
+         (fn [fun]
+           (emit/box (emit/get-field (emit/arg fun 0) 1))))
+       (hash-map :arity 0 :value)
+       (list)))
+
+;; (defn ^:private emit-integer-type []
+;;   (gen/type builtin/integer-type-name
+;;     [{:type emit/ValueP :name 'meta :field-id 0}
+;;      {:type emit/int64 :name 'value :field-id 1}]
+;;     (fn [type]
+;;       [])))
+
 (defn ^:private emit-binary-type []
   ;; TODO: implement protocol methods
   (gen/type builtin/binary-type-name
     [{:type emit/int64 :name 'size :field-id 0}
      {:type emit/int8-ptr :name 'data :field-id 1}]
     (fn [type]
-      [(gen/protocol* builtin/binary-type-name pointer (binary-to-pointer type))])))
+      [(gen/protocol* builtin/binary-type-name pointer (binary-to-pointer type))
+       (gen/protocol* builtin/binary-type-name counted (binary-size type))])))
 
 (defn ^:private emit-array-type []
   ;; TODO: implement protocol methods
@@ -39,4 +58,5 @@
 (defn rt0 []
   (emit/with-unit (emit/unit "__torque_rt0")
     (emit-binary-type)
+    ;; (emit-integer-type)
     (emit-array-type)))

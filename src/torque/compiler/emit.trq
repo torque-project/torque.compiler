@@ -58,6 +58,7 @@
 (ffi/defimport -store llvm LLVMBuildStore :ptr [:ptr :ptr :ptr])
 (ffi/defimport -load llvm LLVMBuildLoad :ptr [:ptr :ptr :string])
 (ffi/defimport -bitcast llvm LLVMBuildBitCast :ptr [:ptr :ptr :ptr :string])
+(ffi/defimport -trunc llvm LLVMBuildTrunc :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport -ptrcast llvm LLVMBuildPointerCast :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport -cast llvm LLVMBuildCast :ptr [:ptr :ptr :ptr :string])
 ;; (ffi/defimport malloc llvm LLVMBuildMalloc :ptr [:ptr :ptr :string])
@@ -83,6 +84,7 @@
 (ffi/defimport const-struct llvm LLVMConstStruct :ptr [:ptr :uint32 :bool])
 (ffi/defimport const-typed llvm LLVMConstNamedStruct :ptr [:ptr :ptr :uint32])
 (ffi/defimport const-cast llvm LLVMConstBitCast :ptr [:ptr :ptr])
+(ffi/defimport const-trunc llvm LLVMConstTrunc :ptr [:ptr :ptr])
 (ffi/defimport const-gep llvm LLVMConstInBoundsGEP :ptr [:ptr :ptr :uint32])
 (ffi/defimport -sizeof llvm LLVMSizeOf :ptr [:ptr])
 
@@ -333,6 +335,9 @@
      ;; TODO: error
      )))
 
+(defn int? [x]
+  (== (kind (intptr (type-of x))) int-kind))
+
 (defn find-type [name]
   (type (-find-type (intptr *unit*) name)))
 
@@ -378,6 +383,12 @@
    (value (const-cast (intptr val) (intptr type))))
   ([val type]
    (value (-bitcast (intptr *builder*) (intptr val) (intptr type) ""))))
+
+(defn trunc
+  ([val type]
+   (value (const-trunc (intptr val) (intptr type))))
+  ([val type]
+   (value (-trunc (intptr *builder*) (intptr val) (intptr type) ""))))
 
 (defn mangle-ns [ns]
   (str/replace (name ns) "." "_"))
@@ -443,13 +454,14 @@
   (ptr-of box-type))
 
 (defn boxed? [a]
-  (let [type (extern "torque_lang_Integer" TypeP)]
-    (value
-      (-icmp (intptr *builder*)
-             eq
-             (intptr (load type "")) 
-             (intptr (value-type a))
-             ""))))
+  (and (not (int? a))
+       (let [type (extern "torque_lang_Integer" TypeP)]
+         (value
+          (-icmp (intptr *builder*)
+                 eq
+                 (intptr (load type "")) 
+                 (intptr (value-type a))
+                 "")))))
 
 (defn unbox [x]
   (if (= (-> x type-of intptr kind) int-kind)
@@ -467,6 +479,10 @@
 
 (defn allocate [size]
   (malloc size))
+
+(defn memcpy [dst src len]
+  (-> (declare-fun! "memcpy" int8-ptr [int8-ptr int8-ptr int64])
+      (call [dst src len])))
 
 (defn new*
   ([name args]
@@ -708,11 +724,6 @@
 
 (defn instance-of [type x]
   (cmp eq type (value-type x)))
-
-(defn integer? [x]
-  (or (== (kind (intptr (type-of x))) int-kind)
-      (-> (value-type x)
-          (identical (extern "torque_lang_Integer" TypeP)))))
 
 (defn set-global! [global init]
   (set-init! (intptr global) (if init (intptr init) (intptr nil*)))

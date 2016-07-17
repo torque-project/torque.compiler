@@ -106,9 +106,7 @@
     :else (throw-not-a-constant val)))
 
 (defmethod -compile-ast :default [ast ctx]
-  (print "DEFAULT")
-  (print (:form ast))
-  (throw (ex-info "Unknown operation" {:op (:op ast) :ast ast})))
+  (throw (ex-info "Unknown operation" {:op (:op ast)})))
 
 (defmethod -compile-ast :const [ast ctx]
   {:value
@@ -204,7 +202,10 @@
     (let [binding (first bindings)
           value   (first values)]
       (when (and binding value)
-        (emit/store binding (:value value))
+        (emit/store binding
+          (if (emit/boxed? (emit/load binding ""))
+            (emit/box (:value value))
+            (emit/unbox (:value value))))
         (recur (next bindings) (next values)))))
   (emit/recur* (:recur-point ctx))
   nil)
@@ -412,7 +413,7 @@
 (defn ^:private emit-instrinsic*
   ([op ctx x]
    (cond
-     ;; (= op "integer?")    (emit/integer? x)
+     (= op "integer?")    (builtin/integer? x)
      (= op "binary?")     (emit/instance-of (builtin/binary) x)
      (= op "array?")      (emit/instance-of (builtin/array) x)
      (= op "type")        (emit/value-type (emit/box x))
@@ -423,7 +424,6 @@
      (= op "print")       (emit/print x)))
   ([op ctx a b]
    (cond
-     ;; operator intrinsics
      (= op "+")   (emit/add a b)
      (= op "-")   (emit/sub a b)
      (= op "*")   (emit/mul a b)
@@ -438,14 +438,15 @@
      (= op "|")   (emit/bit-or a b)
      (= op "bsl") (emit/bsl a b)
      (= op "bsr") (emit/bsr a b)
-     ;; builtin functions
      (= op "identical?") (emit/identical a b)
      (= op "satisfies?") (satisfies a b)
      (= op "bget")       (builtin/bget a (emit/unbox b))
      (= op "aget")       (builtin/aget a (emit/unbox b))))
   ([op ctx a b c]
    (cond
-     (= op "aset") (builtin/aset a (emit/unbox b) c))))
+     (= op "aset")  (builtin/aset a (emit/unbox b) c)
+     (= op "bset")  (builtin/bset a (emit/unbox b) (emit/unbox c))
+     (= op "mcopy") (builtin/mcopy a b (emit/unbox c)))))
 
 (defn ^:private emit-instrinsic [callable args ctx]
   (let [op (name (:field callable))]

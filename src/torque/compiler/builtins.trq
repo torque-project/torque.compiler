@@ -2,6 +2,7 @@
  (:require
    [torque.compiler.emit :as emit]))
 
+(def integer-type-name "torque_lang_Integer")
 (def binary-type-name  "torque_lang_Binary")
 (def array-type-name   "torque_lang_Array")
 (def string-type-name  "torque_lang_string_String")
@@ -10,6 +11,9 @@
 (def vector-type-name  "torque_lang_vector_PersistentVector")
 (def set-type-name     "torque_lang_set_PersistentHashSet")
 (def map-type-name     "torque_lang_map_PersistentArrayMap")
+
+(defn integer []
+  (emit/import-type integer-type-name))
 
 (defn binary []
   (emit/import-type binary-type-name))
@@ -37,15 +41,31 @@
    (let [ctor      (binary-ctor)
          type-size (emit/sizeof (binary-type))
          ptr       (emit/allocate (emit/add type-size size))]
-     (emit/call ctor [ptr size (emit/advance-ptr ptr size)]))))
+     (emit/call ctor [ptr size (emit/advance-ptr ptr type-size)]))))
 
 (defn bget [b idx]
   (-> (emit/bitcast b (emit/ptr-of (binary-type)))
       (emit/get-field 2)
       (emit/buffer-at idx)))
 
+(defn bset [b idx val]
+  (let [byte (emit/trunc val emit/int8)]
+    (-> (emit/bitcast b (emit/ptr-of (binary-type)))
+        (emit/get-field 2)
+        (emit/advance-ptr idx)
+        (emit/store byte)))
+  b)
+
 (defn blength [b]
   (emit/get-field (emit/bitcast b (emit/ptr-of (binary-type))) 1))
+
+(defn bdata [b]
+  (emit/get-field (emit/bitcast b (emit/ptr-of (binary-type))) 1))
+
+(defn mcopy [dst src len]
+  (let [dst-ptr (emit/unbox dst)
+        src-ptr (emit/unbox src)]
+    (emit/memcpy dst-ptr src-ptr len)))
 
 (defn ^:private array-ctor []
   (emit/declare-ctor! array-type-name [emit/int64 emit/ValueP]))
@@ -70,7 +90,8 @@
   (-> (emit/bitcast a (emit/ptr-of (array-type)))
       (emit/get-field 2)
       (emit/advance-ptr idx)
-      (emit/store val)))
+      (emit/store val))
+  a)
 
 (defn alength [a]
   (emit/get-field (emit/bitcast a (emit/ptr-of (array-type))) 1))
@@ -93,3 +114,6 @@
         n   (make-string (name sym))
         fqn (make-string (str sym))]
     (emit/new* keyword-type-name [emit/nil* (or ns emit/nil*) n fqn])))
+
+(defn integer? [x]
+  (or (emit/int? x) (emit/instance-of (integer) x)))
