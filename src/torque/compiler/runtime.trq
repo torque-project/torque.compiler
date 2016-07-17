@@ -31,6 +31,30 @@
        (hash-map :arity 0 :value)
        (list)))
 
+(defn ^:private binary-equiv [type]
+  (->> (emit/define-fun!
+         (emit/mangle-method builtin/binary-type-name "IEquiv" "-equiv" 2)
+         emit/ValueP [(emit/ptr-of type) (emit/ptr-of type)]
+         (fn [fun]
+           (let [self  (emit/arg fun 0)
+                 other (emit/arg fun 1)]
+             (emit/short-and
+               (fn []
+                 (emit/instance-of (builtin/binary) other))
+               (fn []
+                 (emit/cmp emit/eq
+                   (emit/get-field self 1)
+                   (emit/get-field other 1)))
+               (fn []
+                 (emit/cmp emit/eq
+                   emit/zero
+                   (emit/memcmp
+                     (emit/get-field self 2)
+                     (emit/get-field other 2)
+                     (emit/get-field self 1))))))))
+       (hash-map :arity 1 :value)
+       (list)))
+
 ;; (defn ^:private emit-integer-type []
 ;;   (gen/type builtin/integer-type-name
 ;;     [{:type emit/ValueP :name 'meta :field-id 0}
@@ -45,7 +69,8 @@
      {:type emit/int8-ptr :name 'data :field-id 1}]
     (fn [type]
       [(gen/protocol* builtin/binary-type-name pointer (binary-to-pointer type))
-       (gen/protocol* builtin/binary-type-name counted (binary-size type))])))
+       (gen/protocol* builtin/binary-type-name counted (binary-size type))
+       (gen/protocol* builtin/binary-type-name equiv   (binary-equiv type))])))
 
 (defn ^:private emit-array-type []
   ;; TODO: implement protocol methods

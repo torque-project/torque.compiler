@@ -49,6 +49,7 @@
 (ffi/defimport -shl llvm LLVMBuildShl :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport -lshr llvm LLVMBuildLShr :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport -icmp llvm LLVMBuildICmp :ptr [:ptr :uint32 :ptr :ptr :string])
+(ffi/defimport -not llvm LLVMBuildNot :ptr [:ptr :ptr :string])
 (ffi/defimport br llvm LLVMBuildBr :void [:ptr :ptr])
 (ffi/defimport cond-br llvm LLVMBuildCondBr :ptr [:ptr :ptr :ptr :ptr])
 (ffi/defimport phi llvm LLVMBuildPhi :ptr [:ptr :ptr :string])
@@ -484,6 +485,10 @@
   (-> (declare-fun! "memcpy" int8-ptr [int8-ptr int8-ptr int64])
       (call [dst src len])))
 
+(defn memcmp [dst src len]
+  (-> (declare-fun! "memcmp" int64 [int8-ptr int8-ptr int64])
+      (call [dst src len])))
+
 (defn new*
   ([name args]
    (new* name (find-type name) args))
@@ -595,6 +600,9 @@
                 (intptr (unbox b))
                 "")))
 
+(defn not* [a]
+  (value (-not (intptr *builder*) (intptr a) "")))
+
 (defn cmp [op a b]
   (value (-icmp (intptr *builder*) op (intptr a) (intptr b) "")))
 
@@ -686,11 +694,22 @@
                  fs (partition 2 1 [out] blocks))]
      (cont type out values blocks))))
 
-(defn short-and
+(defn short-or
   "Builds a short circuit logical and construct out of a list of
    builder functions"
   [& fs]
   (cond* int1 fs))
+
+(defn short-and
+  [& fs]
+  (cond* int1
+    (concat
+     (map
+      (fn [f]
+        (fn []
+          (not* (f))))
+      (butlast fs))
+     [(last fs)])))
 
 (defn select [cond a b]
   (value (-select (intptr *builder*) (intptr cond) (intptr a) (intptr b) "")))
@@ -702,7 +721,7 @@
    (fn []
      (if*
       (fn []
-        (short-and (partial boxed? a) (partial boxed? b)))
+        (short-or (partial boxed? a) (partial boxed? b)))
       (fn []
         (cmp eq (unbox a) (unbox b)))
       (fn []
