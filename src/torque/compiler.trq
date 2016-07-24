@@ -170,7 +170,7 @@
     (fn [binding]
       (let [init  (-compile-ast (:init binding) ctx)
             label (name (:name binding))]
-        (emit/mutable-local (:value init) label)))
+        (emit/mutable-local (emit/box (:value init)) label)))
     (:bindings ast)))
 
 (defn ^:private load-loop-bindings [bindings mutables]
@@ -202,10 +202,7 @@
     (let [binding (first bindings)
           value   (first values)]
       (when (and binding value)
-        (emit/store binding
-          (if (emit/boxed? (emit/load binding ""))
-            (emit/box (:value value))
-            (emit/unbox (:value value))))
+        (emit/store binding (emit/box (:value value)))
         (recur (next bindings) (next values)))))
   (emit/recur* (:recur-point ctx))
   nil)
