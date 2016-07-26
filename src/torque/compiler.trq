@@ -331,7 +331,7 @@
     ;; in the repl the analyzer won't be able to resolve a protocol,
     ;; so we need to find it in the runtime
     (some-> (jit/resolve-value (:name protocol)) (meta))
-    protocol))
+    (:var protocol)))
 
 (defn ^:private compile-methods [name methods extensions ctx]
   (map
@@ -350,14 +350,34 @@
                           meth-ctx))))
     methods))
 
+(defn ^:private impose-protocol-order
+  "We impose certain rules on protocols to make dispatch faster.
+   For example the function dispatch protocol will always be emitted
+   first."
+  [extensions]
+  (let [[a b] (split-with
+                (fn [ext]
+                  (let [protocol (:protocol ext)
+                        protocol (if (symbol? protocol)
+                                   {:name (name protocol)
+                                    :ns (namespace protocol)}
+                                   protocol)]
+                    (not
+                      (and (= 'IFn (:name protocol))
+                           (= 'torque.lang.protocols (:ns protocol))))))
+                extensions)]
+    (if (empty? b)
+      a
+      (cons (first b) (concat a (rest b))))))
+
 (defn ^:private compile-extensions [name extensions ctx]
   (mapv
     (fn [extension]
-      (let [protocol (resolve-protocol (:var (:protocol extension)))
+      (let [protocol (resolve-protocol (:protocol extension))
             methods  (:methods extension)]
         (->> (compile-methods name methods (:meths protocol ctx) ctx)
              (gen/protocol (:name protocol) (:id protocol)))))
-    extensions))
+    (impose-protocol-order extensions)))
 
 (defmethod -compile-ast :deftype [ast ctx]
   (let [qname (str (:tag ctx) "_" (:name ast))

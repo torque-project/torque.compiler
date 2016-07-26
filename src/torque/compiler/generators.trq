@@ -184,9 +184,11 @@
           (conditions))))))
 
 (defn ctor [name type instance-struct field-types]
-  (emit/define-fun! (str name "_new") emit/ValueP (cons emit/int8-ptr field-types)
+  (emit/define-fun! (str name "_new")
+    emit/ValueP (cons emit/int8-ptr field-types)
     (fn [fun]
-      (let [instance (emit/bitcast (emit/arg fun 0) (emit/ptr-of instance-struct))]
+      (let [ptr-type (emit/ptr-of instance-struct)
+            instance (emit/bitcast (emit/arg fun 0) ptr-type)]
         (emit/set-field instance 0 type)
         (loop [n     0
                types field-types]
@@ -200,7 +202,8 @@
 
 (defn type [name fields protocol-fn]
   (let [field-types    (map field-type fields)
-        instance-type  (emit/define-struct name (vec (cons emit/TypeP field-types)))
+        instance-type  (emit/define-struct name
+                         (vec (cons emit/TypeP field-types)))
         type           (emit/global (str name "_static") emit/ValueType nil)
         type-ref       (emit/global name emit/ValueP type)
         protocols      (protocol-fn instance-type)
