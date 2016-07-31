@@ -360,7 +360,7 @@
                   (let [protocol (:protocol ext)
                         protocol (if (symbol? protocol)
                                    {:name (name protocol)
-                                    :ns (namespace protocol)}
+                                    :ns   (namespace protocol)}
                                    protocol)]
                     (not
                       (and (= 'IFn (:name protocol))
@@ -427,6 +427,43 @@
       value)
     {:value emit/nil*}))
 
+(defmethod -compile-ast :so [ast ctx]
+  (emit/add-meta-data ["Linker Options" [[(str "-l" (:lib ast))]]])
+  ;; (print emit/*unit*)
+  {:value emit/nil*})
+
+(defmethod -compile-ast :import [ast ctx]
+  (let [ptr (emit/extern (name (:name ast)) emit/void-ptr)]
+    {:value (emit/force-box ptr)}))
+
+(def marshalled-types
+  {:void  emit/void
+   :int32 emit/int32
+   :int64 emit/int64})
+
+(def int-types
+  #{:int32 :int64 :uint32 :uint64})
+
+(defmethod -compile-ast :invoke-ptr [ast ctx]
+  (let [arg-types  (:arg-sig ast)
+        ret-type   (:ret ast)
+        ptr        (:value (-compile-ast (:ptr ast) ctx))
+        args       (compile-all (:args ast) ctx)
+        marshalled (mapv
+                     (fn [arg type]
+                       (cond
+                         (contains? int-types type)
+                           (emit/unbox (:value arg))))
+                     args
+                     arg-types)
+        unboxed    (emit/unbox ptr)
+        signature  (emit/fun-type
+                     (get marshalled-types ret-type)
+                     (map (fn [x] (get marshalled-types x)) arg-types))
+        callable   (emit/bitcast unboxed (emit/ptr-of signature))]
+    (emit/call callable marshalled)
+    {:value emit/nil*}))
+
 (defn ^:private emit-instrinsic*
   ([op ctx x]
    (cond
@@ -469,19 +506,29 @@
   (let [op (name (:field callable))]
     (apply emit-instrinsic* op ctx (map :value args))))
 
+(defn ^:private emit-long-call [self args arity]
+  (print "LONG CALL")
+  (let [[fixed rest] (split-at 8 args)
+        ;; make rest arg array
+        rest-arity   (- arity 7)
+        arr          (builtin/make-array (emit/int rest-arity))]
+    (loop [n  0
+           xs rest]
+      (when-not (nil? xs)
+        (builtin/aset arr (emit/int n) (first xs))
+        (recur (inc n) (next xs))))
+    (gen/emit-protocol-call* self 0 0 8 (concat fixed [arr]))))
+
 (defn ^:private emit-ifn-dispatch [callable-ast args ctx]
   (let [callable (:value (-compile-ast callable-ast ctx))
-        arity    (count args)]
+        arity    (count args)
+        self     (emit/bitcast callable emit/ValueP)
+        args     (map (fn [x] (emit/box (:value x))) args)]
     (if (< arity 8)
       ;; callables always implement IFn as the first protocol, so we try
-      ;; a dispatch to that directly
-      (gen/emit-protocol-call*
-        (emit/bitcast callable emit/ValueP)
-        0
-        0
-        arity
-        (map (fn [x] (emit/box (:value x))) args))
-      ;; TODO: otherwise accumulate args in last argument and call with arity 8
+      ;; to dispatch to that directly
+      (gen/emit-protocol-call* self 0 0 arity args)
+      ;; (emit-long-call self args arity)
       emit/nil*)))
 
 (defn ^:private builtin? [x]

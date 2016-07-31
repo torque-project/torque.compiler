@@ -67,6 +67,11 @@
 (ffi/defimport -igep llvm LLVMBuildInBoundsGEP :ptr [:ptr :ptr :ptr :uint32 :string])
 (ffi/defimport struct-gep llvm LLVMBuildStructGEP :ptr [:ptr :ptr :uint32 :string])
 
+;; meta data
+(ffi/defimport -add-meta-data llvm LLVMAddNamedMetadataOperand :void [:ptr :string :ptr])
+(ffi/defimport -md-node llvm LLVMMDNode :ptr [:ptr :uint32])
+(ffi/defimport -md-string llvm LLVMMDString :ptr [:string :uint32])
+
 ;; utilities
 (ffi/defimport -find-type llvm LLVMGetTypeByName :ptr [:ptr :string])
 (ffi/defimport get-type llvm LLVMTypeOf :ptr [:ptr])
@@ -241,6 +246,7 @@
 (def int32 (type (int32-type)))
 (def int64 (type (int64-type)))
 
+(def void-ptr (ptr-of void))
 (def int8-ptr (ptr-of int8))
 (def int8-ptr-ptr (ptr-of int8-ptr))
 
@@ -384,6 +390,9 @@
    (value (const-cast (intptr val) (intptr type))))
   ([val type]
    (value (-bitcast (intptr *builder*) (intptr val) (intptr type) ""))))
+
+(defn ptrcast [val type]
+  (value (-ptrcast (intptr *builder*) (intptr val) (intptr type) "")))
 
 (defn trunc
   ([val type]
@@ -780,3 +789,21 @@
    (value (const-struct (util/ptrs-to-mem fields) (count fields) false)))
   ([t fields]
    (value (const-typed (intptr t) (util/ptrs-to-mem fields) (count fields)))))
+
+(defn md-node [children]
+  (-md-node (util/ptrs-to-mem children) (count children)))
+
+(defn md-string [s]
+  (-md-string s (count s)))
+
+(defn ^:private build-meta-data
+  [md]
+  (cond
+    (vector? md) (md-node (mapv build-meta-data md))
+    (string? md) (md-string md)))
+
+(defn add-meta-data
+  "Adds meta data to the current module. md is given as vector of vectors
+   and strings"
+  [md]
+  (-add-meta-data (intptr *unit*) "" (build-meta-data md)))

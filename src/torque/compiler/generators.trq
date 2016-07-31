@@ -97,10 +97,11 @@
 (defn ^:private protocol-meth [arities]
   (->> (reduce
          (fn [v impl]
-           (let [fun-ptr (emit/bitcast (:value impl) emit/int8-ptr)]
+           (let [fun-ptr (emit/bitcast (:value impl) emit/int8-ptr)
+                 arity   (:arity impl)]
              (if (:variadic? impl)
-               (variadic-forwarders v (:value impl) (:arity impl))
-               (assoc v (inc (:arity impl)) fun-ptr))))
+               (variadic-forwarders v (:value impl) arity)
+               (assoc v (inc arity) fun-ptr))))
          (vec (replicate 8 emit/nil*))
          arities)
        (emit/array emit/int8-ptr)
