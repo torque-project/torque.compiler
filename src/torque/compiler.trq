@@ -106,7 +106,14 @@
     :else (throw-not-a-constant val)))
 
 (defmethod -compile-ast :default [ast ctx]
-  (throw (ex-info "Unknown operation" {:op (:op ast)})))
+  (throw
+    (ex-info "Unknown AST node type"
+      (merge
+       {:op (:op ast)
+        :ns (:ns @*compiler-env*)}
+       (cond
+         (= (:op ast) :maybe-class) {:sym (:class ast)}
+         :else {})))))
 
 (defmethod -compile-ast :const [ast ctx]
   {:value
@@ -429,40 +436,56 @@
 
 (defmethod -compile-ast :so [ast ctx]
   (emit/add-meta-data ["Linker Options" [[(str "-l" (:lib ast))]]])
-  ;; (print emit/*unit*)
   {:value emit/nil*})
 
 (defmethod -compile-ast :import [ast ctx]
-  (let [ptr (emit/extern (name (:name ast)) emit/void-ptr)]
-    {:value (emit/force-box ptr)}))
+  (let [ptr   (emit/extern (name (:name ast)) emit/void-ptr)
+        boxed (emit/force-box ptr)]
+    {:value boxed}))
 
 (def marshalled-types
-  {:void  emit/void
-   :int32 emit/int32
-   :int64 emit/int64})
+  {:void   emit/void
+   :sint32 emit/int32
+   :sint64 emit/int64
+   :uint32 emit/int32
+   :uint64 emit/int64
+   :ptr    emit/int8-ptr})
 
 (def int-types
-  #{:int32 :int64 :uint32 :uint64})
+  #{:sint32 :sint64 :uint32 :uint64})
+
+(defn ^:private marshal-ptr [x]
+  (emit/if*
+    (fn [] (builtin/integer? x))
+    (fn [] (emit/bitcast (emit/unbox x) emit/int8-ptr))
+    (fn [] (emit/bitcast x emit/int8-ptr))))
+
+(defn ^:private unmarshal-ptr [x]
+  (emit/box (emit/bitcast x emit/int64)))
+
+(defn ^:private marshal [arg type]
+  (cond
+    (contains? int-types type) (emit/unbox (:value arg))
+    (= type :ptr)              (marshal-ptr (:value arg))))
+
+(defn ^:private unmarshal [ret type]
+  (cond
+    (contains? int-types type) (emit/box ret)
+    (= type :ptr)              (unmarshal-ptr ret)))
 
 (defmethod -compile-ast :invoke-ptr [ast ctx]
   (let [arg-types  (:arg-sig ast)
         ret-type   (:ret ast)
         ptr        (:value (-compile-ast (:ptr ast) ctx))
         args       (compile-all (:args ast) ctx)
-        marshalled (mapv
-                     (fn [arg type]
-                       (cond
-                         (contains? int-types type)
-                           (emit/unbox (:value arg))))
-                     args
-                     arg-types)
+        marshalled (mapv marshal args arg-types)
         unboxed    (emit/unbox ptr)
         signature  (emit/fun-type
                      (get marshalled-types ret-type)
                      (map (fn [x] (get marshalled-types x)) arg-types))
-        callable   (emit/bitcast unboxed (emit/ptr-of signature))]
-    (emit/call callable marshalled)
-    {:value emit/nil*}))
+        callable   (emit/bitcast unboxed (emit/ptr-of signature))
+        ret        (emit/call callable marshalled)]
+    {:value (unmarshal ret ret-type)}))
 
 (defn ^:private emit-instrinsic*
   ([op ctx x]
@@ -578,3 +601,8 @@
       ;; that optimizes the code and emits an object file
       ;; (compile-ast ast (empty-context))
       nil)))
+
+(defn platform-features
+  "Detect platform features and return a set of reader conditionals"
+  []
+  (set [:byte-order/lsb]))
