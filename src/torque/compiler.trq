@@ -60,7 +60,7 @@
          (gen/emit-protocol-call v
            protocol
            emit/zero
-           (emit/int emit/int32 2)
+           (emit/int emit/int32 1)
            [v (emit/box (:value val))]))
        empty-coll
        values))))
@@ -86,7 +86,7 @@
             (gen/emit-protocol-call m
               protocol
               emit/one
-              (emit/int emit/int32 3)
+              (emit/int emit/int32 2)
               [m
                (emit/box (:value (first kv)))
                (emit/box (:value (second kv)))]))
@@ -330,7 +330,7 @@
          self
          extension
          (emit/int emit/int32 method)
-         (emit/int emit/int32 (count args))
+         (emit/int emit/int32 (dec (count args)))
          (map :value args))}))
 
 (defn ^:private resolve-protocol [protocol]

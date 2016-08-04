@@ -1,3 +1,5 @@
+;; -*- mode: clojure;-*-
+
 (ns torque.compiler.generators
   (:require
     [torque.compiler.builtins :as builtin]
@@ -25,7 +27,7 @@
       (load-extensions (emit/value-type callable))
       (emit/int emit/int32 id))
     (emit/int emit/int32 meth)
-    (emit/int emit/int32 (inc arity))
+    (emit/int emit/int32 arity)
     (cons callable args)))
 
 (defn find-protocol [type protocol]
@@ -63,7 +65,7 @@
     emit/ValueP (vec (repeat (inc arity) emit/ValueP))
     (fn [fun]
       ;; accumulate args and call rest arg arity
-      (let [count (dec (- arity max-fixed-arity))
+      (let [count (- arity max-fixed-arity)
             rargs (if (> count 0)
                     (builtin/make-array (emit/int count))
                     emit/nil*)]
@@ -77,8 +79,8 @@
              (emit/call impl))))))
 
 (defn ^:private variadic-forwarders [arities impl max-fixed-arity]
-  (if (< max-fixed-arity 7)
-    (let [start-arity (+ max-fixed-arity 1)]
+  (if (< max-fixed-arity 8)
+    (let [start-arity max-fixed-arity]
       (reduce
        (fn [v arity]
          ;; implement a forwarder to the variadic implementation
@@ -101,7 +103,7 @@
                  arity   (:arity impl)]
              (if (:variadic? impl)
                (variadic-forwarders v (:value impl) arity)
-               (assoc v (inc arity) fun-ptr))))
+               (assoc v arity fun-ptr))))
          (vec (replicate 8 emit/nil*))
          arities)
        (emit/array emit/int8-ptr)
