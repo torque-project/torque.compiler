@@ -109,8 +109,7 @@
   (throw
     (ex-info "Unknown AST node type"
       (merge
-       {:op (:op ast)
-        :ns (:ns @*compiler-env*)}
+       {:op (:op ast)}
        (cond
          (= (:op ast) :maybe-class) {:sym (:class ast)}
          :else {})))))
@@ -566,6 +565,10 @@
        ;; TODO: optimize call if it is known to be a fn
        :else               (emit-ifn-dispatch callable args ctx))}))
 
+(defmethod -compile-ast :ns [ast ctx]
+  (swap! *compiler-env* assoc :ns (:name ast))
+  {:value emit/nil*})
+
 (defmacro in-global-env [& body]
   `(env/ensure *compiler-env*
      ~@body))
@@ -578,7 +581,7 @@
     (emit/with-unit unit
       (emit/define-fun! name emit/ValueP []
         (fn [f]
-          (let [tag (emit/mangle-ns (:ns @*compiler-env*))]
+          (let [tag (emit/mangle-ns (-> ast :env :ns))]
             (->> (assoc (fun-context f) :tag tag)
                  (compile-ast ast)
                  (:value))))))
@@ -601,6 +604,9 @@
       ;; that optimizes the code and emits an object file
       ;; (compile-ast ast (empty-context))
       nil)))
+
+(defn current-ns []
+  (:ns @*compiler-env*))
 
 (defn platform-features
   "Detect platform features and return a set of reader conditionals"
