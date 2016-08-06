@@ -469,7 +469,7 @@
          (value
           (-icmp (intptr *builder*)
                  eq
-                 (intptr (load type "")) 
+                 (intptr (load type ""))
                  (intptr (value-type a))
                  "")))))
 
@@ -490,6 +490,9 @@
 (defn allocate [size]
   (malloc size))
 
+(defn onstack [type size]
+  (alloca (intptr *builder*) (intptr type) (intptr size)))
+
 (defn memcpy [dst src len]
   (-> (declare-fun! "memcpy" int8-ptr [int8-ptr int8-ptr int64])
       (call [dst src len])))
@@ -497,6 +500,10 @@
 (defn memcmp [dst src len]
   (-> (declare-fun! "memcmp" int64 [int8-ptr int8-ptr int64])
       (call [dst src len])))
+
+(defn strlen [s]
+  (-> (declare-fun! "strlen" int64 [int8-ptr])
+      (call [s])))
 
 (defn new*
   ([name args]

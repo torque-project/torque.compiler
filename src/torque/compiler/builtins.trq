@@ -96,12 +96,15 @@
 (defn alength [a]
   (emit/get-field (emit/bitcast a (emit/ptr-of (array-type))) 1))
 
-(defn make-string [s]
-  (let [data   (emit/global ".string.literal" (emit/string s))
-        size   (emit/int (count s))
-        space  (emit/allocate (emit/sizeof (binary-type)))
-        binary (emit/call (binary-ctor) [space size data])]
-    (emit/new* string-type-name [binary (emit/box emit/one) (emit/box size)])))
+(defn make-string
+  ([s]
+   (make-string
+     (emit/global ".string.literal" (emit/string s))
+     (emit/int (count s))))
+  ([data size]
+   (let [space  (emit/allocate (emit/sizeof (binary-type)))
+         binary (emit/call (binary-ctor) [space size data])]
+     (emit/new* string-type-name [binary (emit/box emit/one) (emit/box size)]))))
 
 (defn make-symbol [sym]
   (let [ns   (some-> (namespace sym) (make-string))

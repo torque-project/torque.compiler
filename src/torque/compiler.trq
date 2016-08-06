@@ -111,7 +111,8 @@
       (merge
        {:op (:op ast)}
        (cond
-         (= (:op ast) :maybe-class) {:sym (:class ast)}
+         (= (:op ast) :maybe-class)     {:sym (:class ast)}
+         (= (:op ast) :maybe-host-form) {:sym (:field ast) :ns (:class ast)}
          :else {})))))
 
 (defmethod -compile-ast :const [ast ctx]
@@ -212,6 +213,12 @@
         (recur (next bindings) (next values)))))
   (emit/recur* (:recur-point ctx))
   nil)
+
+(defmethod -compile-ast :try-catch [ast ctx]
+  {:value (-compile-ast (:expr ast) ctx)})
+
+(defmethod -compile-ast :throw [ast ctx]
+  {:value emit/nil*})
 
 (defn ^:private compiler [ast ctx]
   (fn [] (:value (-compile-ast ast ctx))))
@@ -438,7 +445,8 @@
   {:value emit/nil*})
 
 (defmethod -compile-ast :import [ast ctx]
-  (let [ptr   (emit/extern (name (:name ast)) emit/void-ptr)
+  (let [n     (name (:name ast))
+        ptr   (emit/extern n emit/void-ptr) ;; (or (emit/find-global n) )
         boxed (emit/force-box ptr)]
     {:value boxed}))
 
@@ -448,7 +456,8 @@
    :sint64 emit/int64
    :uint32 emit/int32
    :uint64 emit/int64
-   :ptr    emit/int8-ptr})
+   :ptr    emit/int8-ptr
+   :string emit/int8-ptr})
 
 (def int-types
   #{:sint32 :sint64 :uint32 :uint64})
@@ -459,17 +468,29 @@
     (fn [] (emit/bitcast (emit/unbox x) emit/int8-ptr))
     (fn [] (emit/bitcast x emit/int8-ptr))))
 
+(defn ^:private marshal-str [x]
+  (let [size   (gen/emit-protocol-call* x rt/counted 0 0 [x])
+        ptr    (gen/emit-protocol-call* x rt/pointer 0 0 [x])
+        buffer (emit/onstack emit/int8 (emit/add size))]
+    (emit/store (emit/advance-ptr ptr size) emit/zero)
+    (emit/memcpy buffer ptr size)))
+
 (defn ^:private unmarshal-ptr [x]
   (emit/box (emit/bitcast x emit/int64)))
+
+(defn ^:private unmarshal-str [x]
+  (builtin/make-string x (emit/strlen x)))
 
 (defn ^:private marshal [arg type]
   (cond
     (contains? int-types type) (emit/unbox (:value arg))
+    (= type :string)           (marshal-str (:value arg))
     (= type :ptr)              (marshal-ptr (:value arg))))
 
 (defn ^:private unmarshal [ret type]
   (cond
     (contains? int-types type) (emit/box ret)
+    (= type :string)           (unmarshal-str ret)
     (= type :ptr)              (unmarshal-ptr ret)))
 
 (defmethod -compile-ast :invoke-ptr [ast ctx]
@@ -590,7 +611,7 @@
       (invoke* addr :native []))))
 
 (defn eval [form]
-  (binding [trq/*resolver* nil
+  (binding [trq/*resolver* (r/project-resolver (fs/cwd))
             trq/*eval*     eval-ast]
     (in-global-env
       (-> form trq/analyze eval-ast))))
