@@ -66,6 +66,7 @@
 (ffi/defimport -gep llvm LLVMBuildGEP :ptr [:ptr :ptr :ptr :uint32 :string])
 (ffi/defimport -igep llvm LLVMBuildInBoundsGEP :ptr [:ptr :ptr :ptr :uint32 :string])
 (ffi/defimport struct-gep llvm LLVMBuildStructGEP :ptr [:ptr :ptr :uint32 :string])
+(ffi/defimport -resume llvm LLVMBuildResume :ptr [:ptr :ptr])
 
 ;; meta data
 (ffi/defimport -add-meta-data llvm LLVMAddNamedMetadataOperand :void [:ptr :string :ptr])
@@ -439,6 +440,9 @@
       (count args)
       "")))
 
+(defn resume [ex]
+  (-resume (intptr *builder*) (intptr ex)))
+
 (defn deref [val indices]
   (load (-igep (intptr *builder*)
                (intptr val)
@@ -729,6 +733,26 @@
 
 (defn select [cond a b]
   (value (-select (intptr *builder*) (intptr cond) (intptr a) (intptr b) "")))
+
+(defn catch-block [fun name]
+  (let [block (add-block fun name)
+        pad   (landingpad (intptr *builder*) ...type... ...pers-fn... 1 "")]
+    ;; TODO: add block as catch
+    ))
+
+(defn try-catch [fun try-fn catch-fn]
+  (let [cont        (add-block! (intptr fun) "try.cont")
+        catch       (catch-block fun "try.catch")
+        try-value   (try-fn cont)
+        catch-value (catch-fn cont)]
+    (set-insert-block! (intptr *builder*) cont)
+    (let [phi-value (phi (intptr *builder*) ValueP "")]
+      (add-incoming! phi-value
+        (util/ptrs-to-mem
+          [try-value catch-value]
+          [cont catch]
+          2))
+      phi-value)))
 
 (defn ^:private value-identical [a b]
   (if*

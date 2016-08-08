@@ -214,11 +214,22 @@
   (emit/recur* (:recur-point ctx))
   nil)
 
+(defn ^:private try-catch-block [k]
+  (fn [cont-block]
+    (let [ctx   (assoc ctx k true)
+          value (-compile-ast (:expr k) ctx)]
+      (emit/br cont-block)
+      (:value value))))
+
 (defmethod -compile-ast :try-catch [ast ctx]
-  {:value (-compile-ast (:expr ast) ctx)})
+  {:value
+   (emit/try-catch (:fun ctx)
+     (try-catch-block :try?)
+     (try-catch-block :catch?))})
 
 (defmethod -compile-ast :throw [ast ctx]
-  {:value emit/nil*})
+  (:value (-compile-ast (:throwable ast) ctx))
+  nil)
 
 (defn ^:private compiler [ast ctx]
   (fn [] (:value (-compile-ast ast ctx))))
