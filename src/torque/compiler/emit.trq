@@ -30,6 +30,8 @@
 (ffi/defimport insert-block! llvm LLVMInsertBasicBlock :ptr [:ptr :string])
 (ffi/defimport get-arg llvm LLVMGetParam :ptr [:ptr :uint32])
 (ffi/defimport set-linkage! llvm LLVMSetLinkage :void [:ptr :uint32])
+(ffi/defimport -set-personality! llvm LLVMSetPersonalityFn :void [:ptr :ptr])
+(ffi/defimport -add-attribute llvm LLVMAddFunctionAttr :void [:ptr :uint32])
 
 ;; builder API
 (ffi/defimport -builder llvm LLVMCreateBuilder :ptr [])
@@ -40,6 +42,7 @@
 (ffi/defimport dispose-builder llvm LLVMDisposeBuilder :void [:ptr])
 (ffi/defimport -return  llvm LLVMBuildRet :ptr [:ptr :ptr])
 (ffi/defimport -call llvm LLVMBuildCall :ptr [:ptr :ptr :ptr :uint32 :string])
+(ffi/defimport -invoke llvm LLVMBuildInvoke :ptr [:ptr :ptr :ptr :uint32 :ptr :ptr :string])
 (ffi/defimport -add llvm LLVMBuildAdd :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport -sub llvm LLVMBuildSub :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport -mul llvm LLVMBuildMul :ptr [:ptr :ptr :ptr :string])
@@ -67,6 +70,9 @@
 (ffi/defimport -igep llvm LLVMBuildInBoundsGEP :ptr [:ptr :ptr :ptr :uint32 :string])
 (ffi/defimport struct-gep llvm LLVMBuildStructGEP :ptr [:ptr :ptr :uint32 :string])
 (ffi/defimport -resume llvm LLVMBuildResume :ptr [:ptr :ptr])
+(ffi/defimport -landingpad llvm LLVMBuildLandingPad :ptr [:ptr :ptr :ptr :uint32 :string])
+(ffi/defimport -unreachable llvm LLVMBuildUnreachable :ptr [:ptr])
+(ffi/defimport -add-catch llvm LLVMAddClause :ptr [:ptr :ptr])
 
 ;; meta data
 (ffi/defimport -add-meta-data llvm LLVMAddNamedMetadataOperand :void [:ptr :string :ptr])
@@ -440,6 +446,20 @@
       (count args)
       "")))
 
+(defn invoke
+  ([fun args catch-block]
+   (let [cont-block (add-block! (intptr (current-fun)) "invoke.cont")]
+     (invoke fun args cont-block catch-block)
+     (set-insert-block! (intptr *builder*) (intptr cont-block))))
+  ([fun args cont-block catch-block]
+   (value
+    (-invoke (intptr *builder*)
+             (intptr fun)
+             (util/ptrs-to-mem args)
+             (count args)
+             (intptr cont-block) (intptr catch-block)
+             ""))))
+
 (defn resume [ex]
   (-resume (intptr *builder*) (intptr ex)))
 
@@ -558,6 +578,8 @@
    (define-fun! name {}  ret args body-fn))
   ([name opts ret args body-fn]
    (let [fun (declare-fun! name ret args)]
+     (when (:unwind opts)
+       (-add-attribute (intptr fun) (bit-shift-left 1 30)))
      (when-let [linkage (:link opts)]
        (set-linkage! (intptr fun) (linkage-flag linkage)))
      (when (ffi/not-null (get-first-block fun))
@@ -734,25 +756,31 @@
 (defn select [cond a b]
   (value (-select (intptr *builder*) (intptr cond) (intptr a) (intptr b) "")))
 
+(defn unreachable []
+  (-unreachable (intptr *builder*)))
+
+(defn personality []
+  (declare-fun! "__trq_personality_v0" void [int32 int32 void-ptr void-ptr]))
+
+(defn landingpad []
+  (let [p   (personality)
+        pad (-landingpad (intptr *builder*) (intptr ValueP) (intptr p) 1 "")] 
+    (-add-catch (intptr pad) (intptr (null TypeP)))))
+
 (defn catch-block [fun name]
-  (let [block (add-block fun name)
-        pad   (landingpad (intptr *builder*) ...type... ...pers-fn... 1 "")]
-    ;; TODO: add block as catch
-    ))
+  (let [block (add-block! (intptr fun) name)
+        _     (set-insert-block! (intptr *builder*) block)
+        pad   (landingpad)]
+    block))
 
 (defn try-catch [fun try-fn catch-fn]
-  (let [cont        (add-block! (intptr fun) "try.cont")
+  (let [try-entry   (add-block! (intptr fun) "try")
+        cont-block  (add-block! (intptr fun) "try.cont")
+        _           (br (intptr *builder*) (intptr try-entry))
         catch       (catch-block fun "try.catch")
-        try-value   (try-fn cont)
-        catch-value (catch-fn cont)]
-    (set-insert-block! (intptr *builder*) cont)
-    (let [phi-value (phi (intptr *builder*) ValueP "")]
-      (add-incoming! phi-value
-        (util/ptrs-to-mem
-          [try-value catch-value]
-          [cont catch]
-          2))
-      phi-value)))
+        try-value   (branch try-entry cont-block (fn [] (try-fn cont-block catch)))
+        catch-value (branch catch cont-block (fn [] (catch-fn cont-block catch)))]
+    (cont ValueP cont-block [try-value catch-value] [try-entry catch])))
 
 (defn ^:private value-identical [a b]
   (if*
@@ -838,3 +866,6 @@
    and strings"
   [md]
   (-add-meta-data (intptr *unit*) "" (build-meta-data md)))
+
+(defn set-personality! [f]
+  (-set-personality! (intptr f) (intptr (personality))))

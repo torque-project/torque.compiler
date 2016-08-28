@@ -1,15 +1,18 @@
+;; -*- mode: clojure;-*-
+
 (ns torque.compiler.jit
   (:require
     [torque.compiler.emit :as emit]
     [torque.compiler.generators :as gen]
-    [torque.compiler.runtime :as rt] 
+    [torque.compiler.runtime :as rt]
     [torque.compiler.util :as util]
     [torque.ffi :as ffi]
     [torque.string :as str]))
 
-(def ^:private host  (ffi/so))
-(def ^:private llvm  (ffi/so "LLVM"))
-(def ^:private libdl (ffi/so "dl"))
+(def ^:private host   (ffi/so))
+(def ^:private llvm   (ffi/so "LLVM"))
+(def ^:private libdl  (ffi/so "dl"))
+(def ^:private libabi (ffi/so "abi"))
 
 (ffi/defimport dls libdl dlsym :ptr [:ptr :string])
 
@@ -62,6 +65,10 @@
 (defn host-triple []
   (util/message (default-triple)))
 
+(def specials
+  {"__trq_throw"          (ffi/import libabi __trq_throw)
+   "__trq_personality_v0" (ffi/import libabi __trq_personality_v0)})
+
 (def jit (atom nil))
 
 (deftype JIT [triple machine stack resolver]
@@ -87,7 +94,7 @@
 
 (defn ^:private resolve-symbol [name _]
   (let [name (if (== (str/at name 0) \_) (str/subs name 1) name)
-        addr (dls host name)]
+        addr (or (get specials name) (dls host name))]
     addr))
 
 (declare register)

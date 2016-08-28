@@ -214,21 +214,28 @@
   (emit/recur* (:recur-point ctx))
   nil)
 
-(defn ^:private try-catch-block [k]
-  (fn [cont-block]
-    (let [ctx   (assoc ctx k true)
-          value (-compile-ast (:expr k) ctx)]
-      (emit/br cont-block)
+(defn ^:private try-catch-block [k expr ctx]
+  (fn [cont catch]
+    (let [ctx   (merge ctx (hash-map k true :try-cont cont :try-catch catch))
+          value (-compile-ast expr ctx)]
       (:value value))))
+
+(defmethod -compile-ast :catch [ast ctx]
+  (-compile-ast (:expr ast) ctx))
 
 (defmethod -compile-ast :try-catch [ast ctx]
   {:value
    (emit/try-catch (:fun ctx)
-     (try-catch-block :try?)
-     (try-catch-block :catch?))})
+     (try-catch-block :try? (:expr ast) ctx)
+     (try-catch-block :catch? (:catch ast) ctx))})
 
 (defmethod -compile-ast :throw [ast ctx]
-  (:value (-compile-ast (:throwable ast) ctx))
+  (let [thrower  (emit/declare-fun! "__trq_throw" emit/void [emit/void-ptr])
+        ex       (:value (-compile-ast (:throwable ast) ctx))]
+    (if (:try? ctx)
+      (emit/invoke thrower [ex] (:try-catch ctx))
+      (emit/call thrower [ex]))
+    (emit/unreachable))
   nil)
 
 (defn ^:private compiler [ast ctx]
@@ -611,8 +618,9 @@
         name (name (gensym "eval"))
         unit (emit/unit name)]
     (emit/with-unit unit
-      (emit/define-fun! name emit/ValueP []
+      (emit/define-fun! name {:unwind true} emit/ValueP []
         (fn [f]
+          (emit/set-personality! f)
           (let [tag (emit/mangle-ns (-> ast :env :ns))]
             (->> (assoc (fun-context f) :tag tag)
                  (compile-ast ast)
