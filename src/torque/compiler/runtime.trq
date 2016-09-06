@@ -1,3 +1,5 @@
+;; -*- mode: clojure;-*-
+
 (ns torque.compiler.runtime
   (:require
     [torque.compiler.builtins :as builtin]

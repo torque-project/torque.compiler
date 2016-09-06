@@ -67,6 +67,7 @@
 
 (def specials
   {"__trq_throw"          (ffi/import libabi __trq_throw)
+   "__trq_get_exception"  (ffi/import libabi __trq_get_exception)
    "__trq_personality_v0" (ffi/import libabi __trq_personality_v0)})
 
 (def jit (atom nil))

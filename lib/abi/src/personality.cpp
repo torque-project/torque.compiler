@@ -37,6 +37,7 @@ struct __trq_scan_result {
 };
 
 struct __trq_exception {
+  void*             thrown_exception;
   __trq_scan_result search_result;
   _Unwind_Exception	unwindHeader;
 };
@@ -251,8 +252,13 @@ static __trq_exception __trq_ex;
 
 void __trq_throw(void* exception) {
   __trq_ex.unwindHeader.exception_class = 0xdeadbeef;
+  __trq_ex.thrown_exception = exception;
   _Unwind_RaiseException(&__trq_ex.unwindHeader);
   exit(-1);
+}
+
+void* __trq_get_exception() {
+  return __trq_ex.thrown_exception;
 }
 
 _Unwind_Reason_Code __trq_personality_v0(

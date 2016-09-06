@@ -221,7 +221,10 @@
       (:value value))))
 
 (defmethod -compile-ast :catch [ast ctx]
-  (-compile-ast (:expr ast) ctx))
+  (let [binding (get-in ast [:exception :form])
+        get-ex  (emit/declare-fun! "__trq_get_exception" emit/ValueP [])
+        ctx     (assoc-in ctx [:env :locals binding] (emit/call get-ex []))]
+    (-compile-ast (:expr ast) ctx)))
 
 (defmethod -compile-ast :try-catch [ast ctx]
   {:value

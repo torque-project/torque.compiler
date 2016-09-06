@@ -1,3 +1,5 @@
+;; -*- mode: clojure;-*-
+
 (ns torque.compiler.builtins
  (:require
    [torque.compiler.emit :as emit]))
