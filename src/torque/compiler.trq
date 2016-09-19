@@ -217,7 +217,10 @@
 (defn ^:private try-catch-block [k expr ctx]
   (fn [cont catch]
     (let [ctx   (merge ctx (hash-map k true :try-cont cont :try-catch catch))
-          value (-compile-ast expr ctx)]
+          value (if (= :try? k)
+                  (binding [emit/*catch* {:unwind catch :cont cont}]
+                    (-compile-ast expr ctx))
+                  (-compile-ast expr ctx))]
       (:value value))))
 
 (defmethod -compile-ast :catch [ast ctx]

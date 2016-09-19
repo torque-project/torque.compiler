@@ -136,6 +136,11 @@
   "The builder object for the currently emitted function"
   nil)
 
+(def ^:dynamic *catch*
+  "A catch block for the current scope. When this is bound, calls
+  to functions will use this block as the target for exceptions"
+  nil)
+
 (deftype Unit [handle pass-manager]
 
   IPrintable
@@ -182,7 +187,7 @@
     x
     (new Type x)))
 
-(deftype Value [handle]
+(deftype Value [handle terminator?]
   IPrintable
   (-str [_]
     (if (ffi/not-null handle)
@@ -196,10 +201,16 @@
   (-typeof [_] (type (get-type handle))))
 
 (defn value [handle]
-  (new Value handle))
+  (new Value handle false))
+
+(defn terminator [handle]
+  (new Value handle true))
 
 (defn value? [x]
   (instance? Value x))
+
+(defn terminator? [x]
+  (and (value? x) (. x terminator?)))
 
 (deftype Builder [handle]
   IResource
@@ -275,10 +286,10 @@
   ([ret args var]
    (type
      (-fun-type
-      (intptr ret)
-      (util/ptrs-to-mem (map type-of args))
-      (count args)
-      var))))
+       (intptr ret)
+       (util/ptrs-to-mem (mapv type-of args))
+       (count args)
+       var))))
 
 ;; basic runtime type definitions
 (def arities-table
@@ -438,26 +449,29 @@
        (ptr-of)
        (bitcast ptr)))
 
-(defn call [fun args]
-  (value
-    (-call (intptr *builder*)
-      (intptr fun)
-      (util/ptrs-to-mem args)
-      (count args)
-      "")))
-
 (defn invoke
   ([fun args catch-block]
-   (let [cont-block (add-block! (intptr (current-fun)) "invoke.cont")]
-     (invoke fun args cont-block catch-block)
-     (set-insert-block! (intptr *builder*) (intptr cont-block))))
+   (let [cont-block (add-block! (intptr (current-fun)) "")
+         ret        (invoke fun args cont-block catch-block)]
+     (set-insert-block! (intptr *builder*) (intptr cont-block))
+     ret))
   ([fun args cont-block catch-block]
-   (value
+   (terminator
     (-invoke (intptr *builder*)
              (intptr fun)
              (util/ptrs-to-mem args)
              (count args)
              (intptr cont-block) (intptr catch-block)
+             ""))))
+
+(defn call [fun args]
+  (if *catch*
+    (invoke fun args (:cont *catch*) (:unwind *catch*))
+    (value
+      (-call (intptr *builder*)
+             (intptr fun)
+             (util/ptrs-to-mem args)
+             (count args)
              ""))))
 
 (defn resume [ex]
@@ -665,7 +679,8 @@
 (defn ^:private branch [block cont branch-fn]
   (set-insert-block! (intptr *builder*) block)
   (when-let [x (box (branch-fn))]
-    (br (intptr *builder*) cont)
+    (when-not (terminator? x)
+      (br (intptr *builder*) cont))
     x))
 
 (defn ^:private cont [type block values blocks]
