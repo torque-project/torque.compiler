@@ -796,7 +796,6 @@
         _          (br (intptr *builder*) (intptr try-entry))
         catch      (catch-block fun "try.catch")
         _          (branch try-entry cont-block (fn [] (try-fn cont-block catch out)))
-        ;; _          (br (intptr *builder*) cont-block)
         _          (branch catch cont-block (fn [] (catch-fn cont-block catch out)))]
     (set-insert-block! (intptr *builder*) cont-block)
     (load out "try.ret")))
