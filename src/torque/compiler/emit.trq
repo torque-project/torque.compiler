@@ -28,6 +28,7 @@
 ;; function API
 (ffi/defimport add-block! llvm LLVMAppendBasicBlock :ptr [:ptr :string])
 (ffi/defimport insert-block! llvm LLVMInsertBasicBlock :ptr [:ptr :string])
+(ffi/defimport entry-block llvm LLVMGetEntryBasicBlock :ptr [:ptr :ptr :ptr])
 (ffi/defimport get-arg llvm LLVMGetParam :ptr [:ptr :uint32])
 (ffi/defimport set-linkage! llvm LLVMSetLinkage :void [:ptr :uint32])
 (ffi/defimport -set-personality! llvm LLVMSetPersonalityFn :void [:ptr :ptr])
@@ -466,7 +467,7 @@
 
 (defn call [fun args]
   (if *catch*
-    (invoke fun args (:cont *catch*) (:unwind *catch*))
+    (invoke fun args #_(:cont *catch*) (:unwind *catch*))
     (value
       (-call (intptr *builder*)
              (intptr fun)
@@ -789,13 +790,16 @@
     block))
 
 (defn try-catch [fun try-fn catch-fn]
-  (let [try-entry   (add-block! (intptr fun) "try")
-        cont-block  (add-block! (intptr fun) "try.cont")
-        _           (br (intptr *builder*) (intptr try-entry))
-        catch       (catch-block fun "try.catch")
-        try-value   (branch try-entry cont-block (fn [] (try-fn cont-block catch)))
-        catch-value (branch catch cont-block (fn [] (catch-fn cont-block catch)))]
-    (cont ValueP cont-block [try-value catch-value] [try-entry catch])))
+  (let [out        (alloca (intptr *builder*) (intptr ValueP) "try.out")
+        try-entry  (add-block! (intptr fun) "try")
+        cont-block (add-block! (intptr fun) "try.cont")
+        _          (br (intptr *builder*) (intptr try-entry))
+        catch      (catch-block fun "try.catch")
+        _          (branch try-entry cont-block (fn [] (try-fn cont-block catch out)))
+        ;; _          (br (intptr *builder*) cont-block)
+        _          (branch catch cont-block (fn [] (catch-fn cont-block catch out)))]
+    (set-insert-block! (intptr *builder*) cont-block)
+    (load out "try.ret")))
 
 (defn ^:private value-identical [a b]
   (if*

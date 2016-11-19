@@ -215,13 +215,13 @@
   nil)
 
 (defn ^:private try-catch-block [k expr ctx]
-  (fn [cont catch]
+  (fn [cont catch out]
     (let [ctx   (merge ctx (hash-map k true :try-cont cont :try-catch catch))
           value (if (= :try? k)
                   (binding [emit/*catch* {:unwind catch :cont cont}]
                     (-compile-ast expr ctx))
                   (-compile-ast expr ctx))]
-      (:value value))))
+      (emit/store out (emit/box (:value value))))))
 
 (defmethod -compile-ast :catch [ast ctx]
   (let [binding (get-in ast [:exception :form])
