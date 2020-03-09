@@ -4,7 +4,8 @@
   (:require
     [torque.compiler.builtins :as builtin]
     [torque.compiler.emit :as emit]
-    [torque.compiler.generators :as gen]))
+    [torque.compiler.generators :as gen]
+    [torque.lang.debug :as d]))
 
 (def printable    0)
 (def counted      2)
@@ -20,7 +21,8 @@
          (emit/mangle-method builtin/binary-type-name "IPointerTarget" "-intptr" 1)
          emit/ValueP [(emit/ptr-of type)]
          (fn [fun]
-           (emit/force-box (emit/get-field (emit/arg fun 0) 2))))
+          (-> (emit/get-field (emit/arg fun 0) 2)
+              (emit/force-box))))
        (hash-map :arity 0 :value)
        (list)))
 
@@ -29,7 +31,7 @@
          (emit/mangle-method builtin/binary-type-name "ICounted" "-count" 1)
          emit/ValueP [(emit/ptr-of type)]
          (fn [fun]
-           (emit/box (emit/get-field (emit/arg fun 0) 1))))
+           (emit/force-box (emit/get-field (emit/arg fun 0) 1))))
        (hash-map :arity 0 :value)
        (list)))
 

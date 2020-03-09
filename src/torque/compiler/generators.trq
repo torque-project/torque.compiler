@@ -56,12 +56,12 @@
 (defn ^:private fixed-args [fun max-fixed-arity]
   (map (partial emit/fn-arg fun) (range max-fixed-arity)))
 
-(defn ^:private mangle-forwarder [arity max-fixed-arity]
-  (str "__rest_arg_forwarder_" arity "_" max-fixed-arity))
+(defn ^:private mangle-forwarder [name arity max-fixed-arity]
+  (str name "__rest_arg_forwarder_" arity "_" max-fixed-arity))
 
-(defn ^:private variadic-forwarder [arity impl max-fixed-arity]
-  (emit/define-fun! (mangle-forwarder arity max-fixed-arity)
-    {:link :once}
+(defn ^:private variadic-forwarder [name arity impl max-fixed-arity]
+  (emit/define-fun! (mangle-forwarder name arity max-fixed-arity)
+    ;; {:link :once}
     emit/ValueP (vec (repeat (inc arity) emit/ValueP))
     (fn [fun]
       ;; accumulate args and call rest arg arity
@@ -78,7 +78,7 @@
              (cons (emit/arg fun 0))
              (emit/call impl))))))
 
-(defn ^:private variadic-forwarders [arities impl max-fixed-arity]
+(defn ^:private variadic-forwarders [name arities impl max-fixed-arity]
   (if (< max-fixed-arity 8)
     (let [start-arity max-fixed-arity]
       (reduce
@@ -88,7 +88,7 @@
          ;; correctly dispatches the case:
          ;; (fn ([x] ...) ([x & xs] ...))
          (if (= (get v arity) emit/nil*)
-           (->> (-> (variadic-forwarder arity impl max-fixed-arity)
+           (->> (-> (variadic-forwarder name arity impl max-fixed-arity)
                     (emit/value)
                     (emit/bitcast emit/int8-ptr))
                 (assoc v arity))
@@ -96,13 +96,13 @@
         arities
         (take (- 8 start-arity) (iterate inc start-arity))))))
 
-(defn ^:private protocol-meth [arities]
+(defn ^:private protocol-meth [name arities]
   (->> (reduce
          (fn [v impl]
            (let [fun-ptr (emit/bitcast (:value impl) emit/int8-ptr)
                  arity   (:arity impl)]
              (if (:variadic? impl)
-               (variadic-forwarders v (:value impl) arity)
+               (variadic-forwarders name v (:value impl) arity)
                (assoc v arity fun-ptr))))
          (vec (replicate 8 emit/nil*))
          arities)
@@ -117,7 +117,7 @@
   (->> impls
        (mapv
          (fn [impl]
-           (protocol-meth impl)))
+           (protocol-meth name impl)))
        (emit/array emit/arities-table)
        (emit/global (str name "_methods"))
        (swizzle-cast (emit/ptr-of emit/arities-table))
@@ -125,7 +125,8 @@
        (emit/struct emit/dispatch-entry)))
 
 (defn protocol* [name id & impls]
-  (protocol name id impls))
+  (let [x (protocol name id impls)]
+    x))
 
 (defn import-strcmp []
   (emit/declare-fun! "strncmp" emit/int32
@@ -188,15 +189,16 @@
 
 (defn ctor [name type instance-struct field-types]
   (emit/define-fun! (str name "_new")
-    emit/ValueP (cons emit/int8-ptr field-types)
+    emit/ValueP field-types
     (fn [fun]
       (let [ptr-type (emit/ptr-of instance-struct)
-            instance (emit/bitcast (emit/arg fun 0) ptr-type)]
+            mem      (emit/allocate (emit/sizeof instance-struct))
+            instance (emit/bitcast mem ptr-type)]
         (emit/set-field instance 0 type)
         (loop [n     0
                types field-types]
           (when-let [field-type (first types)]
-            (emit/set-field instance (inc n) (emit/arg fun (inc n)))
+            (emit/set-field instance (inc n) (emit/arg fun n))
             (recur (inc n) (next types))))
         (emit/bitcast instance emit/ValueP)))))
 

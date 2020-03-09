@@ -21,6 +21,7 @@
 (ffi/defimport dump llvm LLVMDumpModule :void [:ptr])
 (ffi/defimport add-fun! llvm LLVMAddFunction :ptr [:ptr :string :ptr])
 (ffi/defimport get-fun llvm LLVMGetNamedFunction :ptr [:ptr :string])
+(ffi/defimport add-global-ifun! llvm LLVMAddGlobalIFunc :ptr [:ptr :string :uint32 :ptr :uint32 :ptr])
 (ffi/defimport named-global llvm LLVMGetNamedGlobal :ptr [:ptr :string])
 (ffi/defimport add-global! llvm LLVMAddGlobal :ptr [:ptr :ptr :string])
 (ffi/defimport set-init! llvm LLVMSetInitializer :void [:ptr :ptr])
@@ -32,7 +33,7 @@
 (ffi/defimport get-arg llvm LLVMGetParam :ptr [:ptr :uint32])
 (ffi/defimport set-linkage! llvm LLVMSetLinkage :void [:ptr :uint32])
 (ffi/defimport -set-personality! llvm LLVMSetPersonalityFn :void [:ptr :ptr])
-(ffi/defimport -add-attribute llvm LLVMAddFunctionAttr :void [:ptr :uint32])
+;; (ffi/defimport -add-attribute llvm LLVMAddFunctionAttr :void [:ptr :ptr])
 
 ;; builder API
 (ffi/defimport -builder llvm LLVMCreateBuilder :ptr [])
@@ -65,6 +66,7 @@
 (ffi/defimport -bitcast llvm LLVMBuildBitCast :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport -trunc llvm LLVMBuildTrunc :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport -ptrcast llvm LLVMBuildPointerCast :ptr [:ptr :ptr :ptr :string])
+(ffi/defimport -ptrtoint llvm LLVMBuildPtrToInt :ptr [:ptr :ptr :ptr :string])
 (ffi/defimport -cast llvm LLVMBuildCast :ptr [:ptr :ptr :ptr :string])
 ;; (ffi/defimport malloc llvm LLVMBuildMalloc :ptr [:ptr :ptr :string])
 (ffi/defimport -gep llvm LLVMBuildGEP :ptr [:ptr :ptr :ptr :uint32 :string])
@@ -154,8 +156,9 @@
   (-intptr [_] handle))
 
 (defn unit [n]
-  (let [m (module n)]
-    (new Unit m (pass-manager m))))
+  (let [m  (module n)
+        pm (pass-manager m)]
+    (new Unit m pm)))
 
 (defn unit? [x]
   (instance? Unit x))
@@ -441,6 +444,14 @@
     (or (ffi/not-null (get-fun (intptr *unit*) name))
         (add-fun! (intptr *unit*) name (intptr type))))))
 
+(defn declare-ifun!
+ ([name ret args]
+  (declare-ifun! name ret args false))
+ ([name ret args var]
+  (let [type (fun-type (type ret) (map type args) var)]
+    (or (ffi/not-null (get-fun (intptr *unit*) name))
+        (add-fun! (intptr *unit*) name (intptr type))))))
+
 (defn declare-ctor! [name fields]
   (declare-fun! (str name "_new") ValueP (cons int8-ptr fields)))
 
@@ -544,22 +555,18 @@
   (-> (declare-fun! "strlen" int64 [int8-ptr])
       (call [s])))
 
-(defn new*
-  ([name args]
-   (new* name (find-type name) args))
-  ([name type args]
-   (let [num    (count args)
-         types  (cons int8-ptr (mapv (fn [x] (type-of x)) args))
-         mem    (allocate (sizeof type))
-         values (cons (intptr mem) (mapv (fn [x] (intptr x)) args))
-         ctor   (declare-fun! (str name "_new") (intptr ValueP) types)]
+(defn new* [name args]
+  (let [num    (count args)
+        types  (mapv (fn [x] (type-of x)) args)
+        values (mapv (fn [x] (intptr x)) args)
+        ctor   (declare-fun! (str name "_new") (intptr ValueP) types)]
      (-> (intptr *builder*)
-         (-call ctor (util/ptrs-to-mem values) (inc num) "")
-         (value)))))
+         (-call ctor (util/ptrs-to-mem values) num "")
+         (value))))
 
 (defn ^:private force-box [x]
   (-> (declare-fun! "torque_lang_Integer_new" ValueP [int64])
-      (call [x])))
+      (call [(-ptrtoint (intptr *builder*) (intptr x) (intptr int64) "")])))
 
 (defn ^:private select-boolean [x]
   (value
@@ -594,7 +601,9 @@
   ([name opts ret args body-fn]
    (let [fun (declare-fun! name ret args)]
      (when (:unwind opts)
-       (-add-attribute (intptr fun) (bit-shift-left 1 30)))
+       ;; ()
+       ;; (-add-attribute (intptr fun) (bit-shift-left 1 30))
+     )
      (when-let [linkage (:link opts)]
        (set-linkage! (intptr fun) (linkage-flag linkage)))
      (when (ffi/not-null (get-first-block fun))
@@ -851,7 +860,7 @@
     x))
 
 (defn print [x]
-  (log "PRINT: %s\n" (unbox x))
+  (log "PRINT: %d\n" (unbox x))
   nil*)
 
 (defn string [init]

@@ -16,7 +16,7 @@
 
 (def ^:dynamic *compiler-env*
   "The global environment of the compiler. This holds all name
-  sapce compiled so far"
+  spacesb compiled so far"
   (atom (a/empty-env)))
 
 (defn throw-not-a-constant [val]
@@ -65,6 +65,11 @@
        empty-coll
        values))))
 
+(defn make-list [values]
+  (let [empty-list (empty-coll "list")
+        type       (builtin/list)]
+    (into-coll type values empty-list)))
+
 (defn make-vector [values]
   (let [empty-vector (empty-coll "vector")
         type         (builtin/vector)]
@@ -101,6 +106,7 @@
     (string? val)  (builtin/make-string val)
     (symbol? val)  (builtin/make-symbol val)
     (keyword? val) (builtin/make-keyword val)
+    (list? val)    (make-list (map make-const val))
     (vector? val)  (make-vector (map make-const val))
     (set? val)     (make-set (map make-const val))
     :else (throw-not-a-constant val)))
@@ -109,7 +115,7 @@
   (throw
     (ex-info "Unknown AST node type"
       (merge
-       {:op (:op ast)}
+       {:op (:op ast) :form (:form ast)}
        (cond
          (= (:op ast) :maybe-class)     {:sym (:class ast)}
          (= (:op ast) :maybe-host-form) {:sym (:field ast) :ns (:class ast)}
@@ -126,6 +132,7 @@
       (= (:type ast) :keyword) (builtin/make-keyword (:val ast))
       (= (:type ast) :vector)  (make-const (:val ast))
       (= (:type ast) :set)     (make-const (:val ast))
+      (= (:type ast) :seq)     (make-const (:val ast))
       :else (throw-not-a-constant-type ast))})
 
 (defmethod -compile-ast :vector [ast ctx]
@@ -180,7 +187,7 @@
         (emit/mutable-local (emit/box (:value init)) label)))
     (:bindings ast)))
 
-(defn ^:private load-loop-bindings [bindings mutables]
+(defn ^:private load-recur-bindings [bindings mutables]
   (->> (map (fn [binding mutable]
               (let [n (:name binding)]
                 [n (emit/load mutable (name n))]))
@@ -188,19 +195,19 @@
             mutables)
        (into {})))
 
-(defn ^:private emit-loop-ctx [ast mutables block ctx]
-  (let [loads  (load-loop-bindings (:bindings ast) mutables)
+(defn ^:private emit-recur-ctx [bindings mutables block ctx]
+  (let [loads  (load-recur-bindings bindings mutables)
         locals (update-in ctx [:env :locals] merge loads)]
     (merge locals
            {:recur-point block
             :recur-bindings mutables})))
 
 (defmethod -compile-ast :loop [ast ctx]
-  (let [bindings (emit-loop-storage ast ctx)
+  (let [mutables (emit-loop-storage ast ctx)
         label    (name (:loop-id ast))]
     (emit/in-block label
       (fn [block]
-        (->> (emit-loop-ctx ast bindings block ctx)
+        (->> (emit-recur-ctx (:bindings ast) mutables block ctx)
              (-compile-ast (:body ast)))))))
 
 (defmethod -compile-ast :recur [ast ctx]
@@ -307,10 +314,12 @@
 (defn ^:private emit-params [ast ctx]
   (reduce
     (fn [ctx binding]
-      (let [value (emit/arg (:fun ctx) (:arg-id binding))]
+      (let [label   (:name binding)
+            value   (emit/arg (:fun ctx) (:arg-id binding))
+            mutable (emit/mutable-local value (name label))]
         (assoc-in ctx
-          [:env :locals (:name binding)]
-          value)))
+          [:env :locals label]
+          mutable)))
     ctx
     (:params ast)))
 
@@ -327,6 +336,13 @@
       (conj args emit/ValueP)
       args)))
 
+(defn ^:private emit-method-body [ast ctx]
+  (emit/in-block (name (:loop-id ast))
+    (fn [block]
+      (let [mutables (map (fn [x] (get-in ctx [:env :locals (:name x)])) (:params ast))]
+        (->> (emit-recur-ctx (:params ast) mutables block ctx)
+             (-compile-ast (:body ast)))))))
+
 (defmethod -compile-ast :fn-method [ast ctx]
   (let [name (emit/mangle (:tag ctx) ast)]
     {:arity     (:fixed-arity ast)
@@ -338,7 +354,7 @@
               (emit-fn-local ast)
               (emit-closed-overs ctx)
               (emit-params ast)
-              (-compile-ast (:body ast))
+              (emit-method-body ast)
               :value)))}))
 
 (defn satisfies [protocol x]
@@ -411,7 +427,7 @@
   (mapv
     (fn [extension]
       (let [protocol (resolve-protocol (:protocol extension))
-            methods  (:methods extension)]
+            methods  (group-by :name (:methods extension))]
         (->> (compile-methods name methods (:meths protocol ctx) ctx)
              (gen/protocol (:name protocol) (:id protocol)))))
     (impose-protocol-order extensions)))
@@ -459,6 +475,7 @@
                  (emit/extern qname emit/ValueP)
                  (or (emit/find-global qname) (emit/global qname emit/nil*)))
         value  (some-> init (-compile-ast ctx))]
+    ;; (print (str "DEF " qname))
     (when value
       (emit/store global (and value (emit/box (:value value))))
       value)
@@ -619,7 +636,6 @@
      ~@body))
 
 (defn eval-ast [ast]
-  ;; (print ast)
   (let [jit  (jit/singleton)
         name (name (gensym "eval"))
         unit (emit/unit name)]
@@ -653,6 +669,9 @@
 
 (defn current-ns []
   (:ns @*compiler-env*))
+
+(defn refer-core [ns]
+  (in-global-env (trq/update-deps ns trq/refer-core)))
 
 (defn platform-features
   "Detect platform features and return a set of reader conditionals"

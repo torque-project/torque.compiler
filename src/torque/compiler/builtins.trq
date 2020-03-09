@@ -5,11 +5,12 @@
    [torque.compiler.emit :as emit]))
 
 (def integer-type-name "torque_lang_Integer")
-(def binary-type-name  "torque_lang_Binary")
 (def array-type-name   "torque_lang_Array")
+(def binary-type-name  "torque_lang_Binary")
 (def string-type-name  "torque_lang_string_String")
-(def symbol-type-name  "torque_lang_symbol_Symbol")
+(def symbol-type-name  "torque_lang_boot_Symbol")
 (def keyword-type-name "torque_lang_keyword_Keyword")
+(def list-type-name    "torque_lang_list_PersistentList")
 (def vector-type-name  "torque_lang_vector_PersistentVector")
 (def set-type-name     "torque_lang_set_PersistentHashSet")
 (def map-type-name     "torque_lang_map_PersistentArrayMap")
@@ -32,6 +33,9 @@
 (defn ^:private binary-ctor []
   (emit/declare-ctor! binary-type-name [emit/int64 emit/int8-ptr]))
 
+(defn list []
+  (emit/import-type list-type-name))
+
 (defn vector []
   (emit/import-type vector-type-name))
 
@@ -40,10 +44,14 @@
 
 (defn make-binary
   ([size]
-   (let [ctor      (binary-ctor)
-         type-size (emit/sizeof (binary-type))
-         ptr       (emit/allocate (emit/add type-size size))]
-     (emit/call ctor [ptr size (emit/advance-ptr ptr type-size)]))))
+   (let [ctor   (binary-ctor)
+         binary (emit/allocate size)]
+     (emit/call ctor [size binary])))
+  ([size data]
+   (let [ctor   (binary-ctor)
+         binary (emit/allocate size)]
+     (emit/memcpy binary data size)
+     (emit/call ctor [size binary]))))
 
 (defn bget [b idx]
   (-> (emit/bitcast b (emit/ptr-of (binary-type)))
@@ -75,13 +83,10 @@
 (defn make-array
   ([count]
    (let [ctor      (array-ctor)
-         type-size (emit/sizeof (array-type))
-         size      (emit/add type-size (emit/mul count emit/pointer-size))
-         ptr       (emit/allocate (emit/add type-size size))
-         array     (emit/bitcast
-                     (emit/advance-ptr ptr size)
-                     (emit/ptr-of emit/ValueP))]
-     (emit/call ctor [ptr count array]))))
+         size      (emit/mul count emit/pointer-size)
+         ptr       (emit/allocate size)
+         array     (emit/bitcast ptr (emit/ptr-of emit/ValueP))]
+     (emit/call ctor [count array]))))
 
 (defn aget [a idx]
   (-> (emit/bitcast a (emit/ptr-of (array-type)))
@@ -104,8 +109,7 @@
      (emit/global ".string.literal" (emit/string s))
      (emit/int (count s))))
   ([data size]
-   (let [space  (emit/allocate (emit/sizeof (binary-type)))
-         binary (emit/call (binary-ctor) [space size data])]
+   (let [binary (make-binary size data)]
      (emit/new* string-type-name [binary (emit/box emit/one) (emit/box size)]))))
 
 (defn make-symbol [sym]

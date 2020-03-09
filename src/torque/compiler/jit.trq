@@ -20,11 +20,11 @@
 (ffi/defimport free-jit llvm LLVMOrcDisposeInstance :void [:ptr])
 
 (ffi/defimport mangle llvm LLVMOrcGetMangledSymbol :void [:ptr ^:out :ptr :string])
-(ffi/defimport resolve llvm LLVMOrcGetSymbolAddress :ptr [:ptr :string])
-(ffi/defimport native-resolve llvm LLVMOrcGetSymbolAddress :native [:ptr :string])
+(ffi/defimport resolve llvm LLVMOrcGetSymbolAddress :ptr [:ptr ^:out :ptr :string])
+(ffi/defimport native-resolve llvm LLVMOrcGetSymbolAddress :ptr [:ptr ^:out :native :string])
 
 (ffi/defimport add-eager-module llvm LLVMOrcAddEagerlyCompiledIR
-  :uint32 [:ptr :ptr :ptr :ptr])
+  :uint32 [:ptr ^:out :ptr :ptr :ptr :ptr])
 
 (ffi/defimport add-lazy-module llvm LLVMOrcAddLazilyCompiledIR
   :uint32 [:ptr :ptr :ptr :ptr])
@@ -111,17 +111,21 @@
           machine  (machine target triple cpu "" 0 0 1)
           resolver (ffi/fnptr resolve-symbol :ptr [:string :ptr])]
       (reset! jit (new JIT triple machine (make-jit machine) resolver))
-      (register (rt/rt0))))
+      (print "Registering builtins...")
+      (let [rt0 (rt/rt0)]
+        ;; (emit/dump rt0)
+        (register rt0)))
+      (print "Done!"))
   @jit)
 
 (defn register [unit]
-  ;; (print unit)
   (if (emit/unit? unit)
     (let [jit    (singleton)
-          passes (emit/optimizer-passes unit)]
+          passes (emit/optimizer-passes unit)
+          out    0]
       (add-machine-passes (. jit machine) passes)
       (emit/init-passes passes)
-      (add-eager-module (stack jit) (intptr unit) (resolver jit) 0))
+      (add-eager-module (stack jit) out (intptr unit) (resolver jit) 0))
     ;; TODO: throw badarg
     ))
 
@@ -129,7 +133,8 @@
   [symbol resolve-fn]
   (if (named? symbol)
     (when-let [jit (singleton)]
-      (let [resolved (resolve-fn (intptr jit) symbol)]
+      (let [resolved 0]
+        (resolve-fn (intptr jit) resolved symbol)
         (ffi/not-null resolved)))
     ;; TODO: return error
     ))

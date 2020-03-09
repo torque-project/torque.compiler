@@ -190,7 +190,7 @@ static void scan_handler_table(
       }
       landing_pad = (uintptr_t) lp_start + landing_pad;
       if (action_entry == 0) {
-        if ((actions && _UA_CLEANUP_PHASE) && !(actions & _UA_HANDLER_FRAME)) {
+        if ((actions & _UA_CLEANUP_PHASE) && !(actions & _UA_HANDLER_FRAME)) {
           result.landing_pad = landing_pad;
           result.reason      = _URC_HANDLER_FOUND;
           return;
