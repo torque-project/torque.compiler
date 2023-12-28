@@ -97,7 +97,7 @@
   (let [name (if (== (str/at name 0) \_) (str/subs name 1) name)
         addr (or (get specials name) (dls host name))]
     (when (= 0 addr)
-      (println "Couldn't resolve" name))
+      (println "Couldn't resolve symbol: " name))
     addr))
 
 (declare register)

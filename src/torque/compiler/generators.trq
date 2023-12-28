@@ -73,10 +73,13 @@
           (dotimes [n count]
             (let [idx (+ max-fixed-arity n)]
               (builtin/aset rargs (emit/int n) (emit/fn-arg fun idx)))))
-        ;; call thru to actual implementation
-        (->> (concat (fixed-args fun max-fixed-arity) [rargs])
+        ; ;; call thru to actual implementation
+        (->> (concat 
+               (fixed-args fun max-fixed-arity) 
+               [(builtin/make-indexed-seq rargs)])
              (cons (emit/arg fun 0))
-             (emit/call impl))))))
+             (emit/call impl))
+        ))))
 
 (defn ^:private variadic-forwarders [name arities impl max-fixed-arity]
   (if (< max-fixed-arity 8)
@@ -213,10 +216,9 @@
         type-ref       (emit/global name emit/ValueP type)
         protocols      (protocol-fn instance-type)
         table-size     (emit/int emit/int32 (count protocols))
-        protocol-table (emit/bitcast
-                         (emit/global (str name "_entries")
-                                      (emit/array emit/dispatch-entry protocols))
-                         emit/dispatch-table)
+        entries        (emit/global (str name "_entries")
+                         (emit/array emit/dispatch-entry protocols))
+        protocol-table (emit/bitcast entries emit/dispatch-table)
         num-fields     (emit/int emit/int32 (count fields))
         field-getter   (field-getter name instance-type fields)
         field-setter   (field-setter name instance-type fields)]

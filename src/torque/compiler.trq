@@ -10,7 +10,7 @@
     [torque.compiler.builtins :as builtin]
     [torque.compiler.emit :as emit]
     [torque.compiler.generators :as gen]
-    [torque.compiler.jit :as jit]
+    [torque.compiler.jit2 :as jit]
     [torque.compiler.runtime :as rt]
     [torque.io.fs :as fs]))
 
@@ -157,6 +157,7 @@
      :else
        (-> ctx :env :locals (get (:name ast))))})
 
+
 (defmethod -compile-ast :var [ast ctx]
   (let [name (emit/mangle-var (:var ast))]
     {:value (emit/load (emit/extern name emit/ValueP) name)}))
@@ -232,7 +233,7 @@
 
 (defmethod -compile-ast :catch [ast ctx]
   (let [binding (get-in ast [:exception :form])
-        get-ex  (emit/declare-fun! "__trq_get_exception" emit/ValueP [])
+        get-ex  (emit/declare-fun! "___trq_get_exception" emit/ValueP [])
         ctx     (assoc-in ctx [:env :locals binding] (emit/call get-ex []))]
     (-compile-ast (:expr ast) ctx)))
 
@@ -243,7 +244,7 @@
      (try-catch-block :catch? (:catch ast) ctx))})
 
 (defmethod -compile-ast :throw [ast ctx]
-  (let [thrower  (emit/declare-fun! "__trq_throw" emit/void [emit/void-ptr])
+  (let [thrower  (emit/declare-fun! "___trq_throw" emit/void [emit/void-ptr])
         ex       (:value (-compile-ast (:throwable ast) ctx))]
     (if (:try? ctx)
       (emit/invoke thrower [ex] (:try-catch ctx))
@@ -344,18 +345,25 @@
              (-compile-ast (:body ast)))))))
 
 (defmethod -compile-ast :fn-method [ast ctx]
-  (let [name (emit/mangle (:tag ctx) ast)]
-    {:arity     (:fixed-arity ast)
-     :variadic? (:variadic? ast)
-     :value
-     (emit/define-fun! name emit/ValueP (arg-types ast ctx)
-       (fn [fun]
-         (->> (assoc (fun-context fun) :tag (:tag ctx))
-              (emit-fn-local ast)
-              (emit-closed-overs ctx)
-              (emit-params ast)
-              (emit-method-body ast)
-              :value)))}))
+  (let [name        (emit/mangle (:tag ctx) ast)
+        extern-name (str "_" name)]
+    ;; register lazy implementation of fun
+    (jit/register-fun name 
+      (fn []
+        (emit/define-fun! extern-name emit/ValueP (arg-types ast ctx)
+          (fn [fun]
+            (->> (assoc (fun-context fun) :tag (:tag ctx))
+                 (emit-fn-local ast)
+                 (emit-closed-overs ctx)
+                 (emit-params ast)
+                 (emit-method-body ast)
+                 :value)))))
+    (let [ext (emit/declare-fun! extern-name emit/ValueP (arg-types ast ctx))]
+      ;; return stub function with callthrough to lazily compiled
+      ;; implementation
+      {:arity     (:fixed-arity ast)
+       :variadic? (:variadic? ast)
+       :value     ext})))
 
 (defn satisfies [protocol x]
   (let [protocol (emit/bitcast protocol emit/ProtoP)]
@@ -647,9 +655,12 @@
             (->> (assoc (fun-context f) :tag tag)
                  (compile-ast ast)
                  (:value))))))
-    (jit/register unit)
+    (println unit)
+    (jit/register-unit name unit)
     (when-let [addr (jit/resolve-address name)]
-      (invoke* addr :native []))))
+      (println "INVOKE")
+      (invoke* addr :native []))
+    (throw "EXIT")))
 
 (defn eval [form]
   (binding [trq/*resolver* (r/project-resolver (fs/cwd))

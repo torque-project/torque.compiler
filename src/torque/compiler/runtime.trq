@@ -17,10 +17,12 @@
 (def pointer      46)
 
 (defn ^:private binary-to-pointer [type]
+  (println "...")
   (->> (emit/define-fun!
          (emit/mangle-method builtin/binary-type-name "IPointerTarget" "-intptr" 1)
          emit/ValueP [(emit/ptr-of type)]
          (fn [fun]
+          (println "...")
           (-> (emit/get-field (emit/arg fun 0) 2)
               (emit/force-box))))
        (hash-map :arity 0 :value)
@@ -59,12 +61,11 @@
        (hash-map :arity 1 :value)
        (list)))
 
-;; (defn ^:private emit-integer-type []
-;;   (gen/type builtin/integer-type-name
-;;     [{:type emit/ValueP :name 'meta :field-id 0}
-;;      {:type emit/int64 :name 'value :field-id 1}]
-;;     (fn [type]
-;;       [])))
+(defn ^:private emit-integer-type []
+  (gen/type builtin/integer-type-name
+    [{:type emit/int64 :name 'value :field-id 1}]
+    (fn [type]
+      [])))
 
 (defn ^:private emit-binary-type []
   ;; TODO: implement protocol methods

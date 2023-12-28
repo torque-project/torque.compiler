@@ -15,6 +15,8 @@
 (def set-type-name     "torque_lang_set_PersistentHashSet")
 (def map-type-name     "torque_lang_map_PersistentArrayMap")
 
+(def indexed-seq-type-name "torque_lang_indexed_IndexedSeq")
+
 (defn integer []
   (emit/import-type integer-type-name))
 
@@ -126,3 +128,6 @@
 
 (defn integer? [x]
   (or (emit/int? x) (emit/instance-of (integer) x)))
+
+(defn make-indexed-seq [a]
+  (emit/new* indexed-seq-type-name [a (emit/box emit/zero)]))

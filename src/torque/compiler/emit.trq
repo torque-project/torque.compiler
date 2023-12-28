@@ -409,9 +409,9 @@
 
 (defn bitcast
   ([val type]
-   (value (const-cast (intptr val) (intptr type))))
-  ([val type]
-   (value (-bitcast (intptr *builder*) (intptr val) (intptr type) ""))))
+    (if *builder*
+      (value (-bitcast (intptr *builder*) (intptr val) (intptr type) ""))
+      (value (const-cast (intptr val) (intptr type))))))
 
 (defn ptrcast [val type]
   (value (-ptrcast (intptr *builder*) (intptr val) (intptr type) "")))
@@ -436,21 +436,26 @@
 (defn mangle-method [type protocol meth arity]
   (str type "_" protocol "_" meth "_" arity))
 
+(defn find-fun [name]
+  (get-fun (intptr *unit*) name))
+
 (defn declare-fun!
  ([name ret args]
   (declare-fun! name ret args false))
  ([name ret args var]
   (let [type (fun-type (type ret) (map type args) var)]
-    (or (ffi/not-null (get-fun (intptr *unit*) name))
-        (add-fun! (intptr *unit*) name (intptr type))))))
+    (value
+      (or (ffi/not-null (get-fun (intptr *unit*) name))
+          (add-fun! (intptr *unit*) name (intptr type)))))))
 
 (defn declare-ifun!
  ([name ret args]
   (declare-ifun! name ret args false))
  ([name ret args var]
   (let [type (fun-type (type ret) (map type args) var)]
-    (or (ffi/not-null (get-fun (intptr *unit*) name))
-        (add-fun! (intptr *unit*) name (intptr type))))))
+    (value 
+      (or (ffi/not-null (get-fun (intptr *unit*) name))
+          (add-fun! (intptr *unit*) name (intptr type)))))))
 
 (defn declare-ctor! [name fields]
   (declare-fun! (str name "_new") ValueP (cons int8-ptr fields)))
@@ -534,7 +539,7 @@
   (value (-sizeof (intptr t))))
 
 (defn malloc [size]
-  (-> (declare-fun! "malloc" int8-ptr [int64])
+  (-> (declare-fun! "_malloc" int8-ptr [int64])
       (call [size])))
 
 (defn allocate [size]
@@ -544,15 +549,15 @@
   (alloca (intptr *builder*) (intptr type) (intptr size)))
 
 (defn memcpy [dst src len]
-  (-> (declare-fun! "memcpy" int8-ptr [int8-ptr int8-ptr int64])
+  (-> (declare-fun! "_memcpy" int8-ptr [int8-ptr int8-ptr int64])
       (call [dst src len])))
 
 (defn memcmp [dst src len]
-  (-> (declare-fun! "memcmp" int64 [int8-ptr int8-ptr int64])
+  (-> (declare-fun! "_memcmp" int64 [int8-ptr int8-ptr int64])
       (call [dst src len])))
 
 (defn strlen [s]
-  (-> (declare-fun! "strlen" int64 [int8-ptr])
+  (-> (declare-fun! "_strlen" int64 [int8-ptr])
       (call [s])))
 
 (defn new* [name args]
@@ -561,7 +566,7 @@
         values (mapv (fn [x] (intptr x)) args)
         ctor   (declare-fun! (str name "_new") (intptr ValueP) types)]
      (-> (intptr *builder*)
-         (-call ctor (util/ptrs-to-mem values) num "")
+         (-call (intptr ctor) (util/ptrs-to-mem values) num "")
          (value))))
 
 (defn ^:private force-box [x]
@@ -587,7 +592,7 @@
         x))))
 
 (defn return [val]
-  (-return (intptr *builder*) (intptr (box val))))
+  (value (-return (intptr *builder*) (intptr (box val)))))
 
 (defn ^:private linkage-flag [linkage]
   (cond
@@ -606,14 +611,14 @@
      )
      (when-let [linkage (:link opts)]
        (set-linkage! (intptr fun) (linkage-flag linkage)))
-     (when (ffi/not-null (get-first-block fun))
+     (when (ffi/not-null (get-first-block (intptr fun)))
        (throw (ex-info (str "Function " name " is already defined") {})))
-     (with-builder (builder (value (add-block! fun "entry")))
+     (with-builder (builder (value (add-block! (intptr fun) "entry")))
        (return (body-fn fun)))
      fun)))
 
 (defn arg [fun n]
-  (value (get-arg fun n)))
+  (value (get-arg (intptr fun) n)))
 
 (defn fn-arg [fun n]
   (arg fun (inc n)))
@@ -785,7 +790,7 @@
   (-unreachable (intptr *builder*)))
 
 (defn personality []
-  (declare-fun! "__trq_personality_v0" void [int32 int32 void-ptr void-ptr]))
+  (declare-fun! "___trq_personality_v0" void [int32 int32 void-ptr void-ptr]))
 
 (defn landingpad []
   (let [p   (personality)
