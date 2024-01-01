@@ -56,23 +56,21 @@
      (emit/call ctor [size binary]))))
 
 (defn bget [b idx]
-  (-> (emit/bitcast b (emit/ptr-of (binary-type)))
-      (emit/get-field 2)
+  (-> (emit/get-field (binary-type) b 2)
       (emit/buffer-at idx)))
 
 (defn bset [b idx val]
   (let [byte (emit/trunc val emit/int8)]
-    (-> (emit/bitcast b (emit/ptr-of (binary-type)))
-        (emit/get-field 2)
+    (-> (emit/get-field (binary-type) b 2)
         (emit/advance-ptr idx)
         (emit/store byte)))
   b)
 
 (defn blength [b]
-  (emit/get-field (emit/bitcast b (emit/ptr-of (binary-type))) 1))
+  (emit/get-field (binary-type) b 1))
 
 (defn bdata [b]
-  (emit/get-field (emit/bitcast b (emit/ptr-of (binary-type))) 1))
+  (emit/get-field (binary-type) b 1))
 
 (defn mcopy [dst src len]
   (let [dst-ptr (emit/unbox dst)
@@ -91,19 +89,17 @@
      (emit/call ctor [count array]))))
 
 (defn aget [a idx]
-  (-> (emit/bitcast a (emit/ptr-of (array-type)))
-      (emit/get-field 2)
+  (-> (emit/get-field (array-type) a 2)
       (emit/buffer-at idx)))
 
 (defn aset [a idx val]
-  (-> (emit/bitcast a (emit/ptr-of (array-type)))
-      (emit/get-field 2)
+  (-> (emit/get-field (array-type) a 2)
       (emit/advance-ptr idx)
       (emit/store val))
   a)
 
 (defn alength [a]
-  (emit/get-field (emit/bitcast a (emit/ptr-of (array-type))) 1))
+  (emit/get-field (array-type) a 1))
 
 (defn make-string
   ([s]

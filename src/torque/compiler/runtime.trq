@@ -1,3 +1,4 @@
+;; vim: set ft=clojure:
 ;; -*- mode: clojure;-*-
 
 (ns torque.compiler.runtime
@@ -17,13 +18,11 @@
 (def pointer      46)
 
 (defn ^:private binary-to-pointer [type]
-  (println "...")
   (->> (emit/define-fun!
          (emit/mangle-method builtin/binary-type-name "IPointerTarget" "-intptr" 1)
          emit/ValueP [(emit/ptr-of type)]
          (fn [fun]
-          (println "...")
-          (-> (emit/get-field (emit/arg fun 0) 2)
+          (-> (emit/get-field type (emit/arg fun 0) 2)
               (emit/force-box))))
        (hash-map :arity 0 :value)
        (list)))
@@ -33,7 +32,7 @@
          (emit/mangle-method builtin/binary-type-name "ICounted" "-count" 1)
          emit/ValueP [(emit/ptr-of type)]
          (fn [fun]
-           (emit/force-box (emit/get-field (emit/arg fun 0) 1))))
+           (emit/force-box (emit/get-field type (emit/arg fun 0) 1))))
        (hash-map :arity 0 :value)
        (list)))
 
@@ -49,15 +48,15 @@
                  (emit/instance-of (builtin/binary) other))
                (fn []
                  (emit/cmp emit/eq
-                   (emit/get-field self 1)
-                   (emit/get-field other 1)))
+                   (emit/get-field type self 1)
+                   (emit/get-field type other 1)))
                (fn []
                  (emit/cmp emit/eq
                    emit/zero
                    (emit/memcmp
-                     (emit/get-field self 2)
-                     (emit/get-field other 2)
-                     (emit/get-field self 1))))))))
+                     (emit/get-field type self 2)
+                     (emit/get-field type other 2)
+                     (emit/get-field type self 1))))))))
        (hash-map :arity 1 :value)
        (list)))
 
@@ -89,4 +88,5 @@
   (emit/with-unit (emit/unit "__torque_rt0")
     (emit-binary-type)
     ;; (emit-integer-type)
-    (emit-array-type)))
+    ;; (emit-array-type)
+    ))

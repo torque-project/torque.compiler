@@ -3,23 +3,23 @@
 (ns torque.compiler.generators
   (:require
     [torque.compiler.builtins :as builtin]
-    [torque.compiler.emit :as emit]))
+    [torque.compiler.emit :as emit]
+    [torque.lang.debug :as d]))
 
 (def max-field-length 256)
 
 (defn ^:private load-extensions [type]
-  (emit/get-field type emit/type-exts))
+  (emit/get-field type emit/dispatch-entry emit/type-exts))
 
 (defn ^:private load-extension [extensions id]
-  (emit/deref extensions [id emit/one]))
+  (emit/deref extensions emit/dispatch-entry [id emit/one]))
 
 (defn ^:private load-dispatch-table [protocol idx arity]
-  (emit/deref protocol [idx emit/zero arity]))
+  (emit/deref protocol emit/arities-table [idx emit/zero arity]))
 
 (defn ^:private emit-protocol-call [callable protocol meth arity args]
-  (let [ptr  (load-dispatch-table protocol meth arity)
-        fun  (emit/fun-from-args ptr emit/ValueP args)]
-    (emit/call fun args)))
+  (let [ptr (load-dispatch-table protocol meth arity)]
+    (emit/call ptr (emit/fun-type emit/ValueP args) args)))
 
 (defn ^:private emit-protocol-call* [callable id meth arity args]
   (emit-protocol-call callable
@@ -32,23 +32,23 @@
 
 (defn find-protocol [type protocol]
   (let [extensions (load-extensions type)
-        size       (emit/get-field type emit/type-num-exts)
+        size       (emit/get-field type emit/int32 emit/type-num-exts)
         idx        (emit/mutable-local emit/zero "nexts")]
     (emit/in-block "dispatch"
       (fn [block]
         (emit/if* emit/methods
           (fn []
-            (->> (emit/load idx "idx") (emit/cmp emit/gt size)))
+            (->> (emit/load emit/int32 idx "idx") (emit/cmp emit/gt size)))
           (fn []
             (emit/if* emit/methods
               (fn []
-                (let [cur (emit/load idx "idx")
+                (let [cur (emit/load emit/int32 idx "idx")
                       id  (emit/deref extensions [cur emit/zero])]
                   (emit/cmp emit/eq id protocol)))
               (fn []
-                (load-extension extensions (emit/load idx "idx")))
+                (load-extension extensions (emit/load emit/int32 idx "idx")))
               (fn []
-                (emit/store idx (emit/add (emit/load idx "id") emit/one))
+                (emit/store idx (emit/add (emit/load emit/int32 idx "id") emit/one))
                 (emit/recur* block))))
           (fn []
             emit/not-implemented))))))
@@ -60,26 +60,28 @@
   (str name "__rest_arg_forwarder_" arity "_" max-fixed-arity))
 
 (defn ^:private variadic-forwarder [name arity impl max-fixed-arity]
-  (emit/define-fun! (mangle-forwarder name arity max-fixed-arity)
-    ;; {:link :once}
-    emit/ValueP (vec (repeat (inc arity) emit/ValueP))
-    (fn [fun]
-      ;; accumulate args and call rest arg arity
-      (let [count (- arity max-fixed-arity)
-            rargs (if (> count 0)
-                    (builtin/make-array (emit/int count))
-                    emit/nil*)]
-        (when rargs
-          (dotimes [n count]
-            (let [idx (+ max-fixed-arity n)]
-              (builtin/aset rargs (emit/int n) (emit/fn-arg fun idx)))))
-        ; ;; call thru to actual implementation
-        (->> (concat 
-               (fixed-args fun max-fixed-arity) 
-               [(builtin/make-indexed-seq rargs)])
-             (cons (emit/arg fun 0))
-             (emit/call impl))
-        ))))
+  (let [return-type emit/ValueP
+        arg-types   (vec (repeat (inc arity) emit/ValueP))
+        t           (emit/fun-type return-type arg-types)]
+    (emit/define-fun! (mangle-forwarder name arity max-fixed-arity)
+      ;; {:link :once}
+      return-type arg-types
+      (fn [fun]
+        ;; accumulate args and call rest arg arity
+        (let [count (- arity max-fixed-arity)
+              rargs (if (> count 0)
+                      (builtin/make-array (emit/int count))
+                      emit/nil*)]
+          (when rargs
+            (dotimes [n count]
+              (let [idx (+ max-fixed-arity n)]
+                (builtin/aset rargs (emit/int n) (emit/fn-arg fun idx)))))
+          ; ;; call thru to actual implementation
+          (->> (concat 
+                 (fixed-args fun max-fixed-arity) 
+                 [(builtin/make-indexed-seq rargs)])
+               (cons (emit/arg fun 0))
+               (emit/call impl t)))))))
 
 (defn ^:private variadic-forwarders [name arities impl max-fixed-arity]
   (if (< max-fixed-arity 8)
@@ -131,6 +133,8 @@
   (let [x (protocol name id impls)]
     x))
 
+(def strcmp-type (emit/fun-type emit/int32 [emit/int8-ptr emit/int8-ptr emit/int64]))
+
 (defn import-strcmp []
   (emit/declare-fun! "strncmp" emit/int32
     [emit/int8-ptr emit/int8-ptr emit/int64]))
@@ -139,15 +143,15 @@
   (fn [field]
     (let [field-name (emit/global ".field" (emit/string (name (:name field))))]
       (->> [field-name str (emit/int max-field-length)]
-           (emit/call strcmp)
+           (emit/call strcmp strcmp-type)
            (emit/cmp emit/eq emit/zero)))))
 
-(defn get-field [this comparator]
+(defn get-field [type this comparator]
   (fn [field]
     (fn []
       (emit/select
        (comparator field)
-       (emit/box (emit/get-field this (inc (:field-id field))))
+       (emit/box (emit/get-field type this (:type field) (inc (:field-id field))))
        emit/nil*))))
 
 (defn field-getter [name type fields]
@@ -158,13 +162,13 @@
       (fn [fun]
         (let [this        (emit/arg fun 0)
               str         (emit/arg fun 1)
-              getter      (get-field this (compare-field this str strcmp))
+              getter      (get-field type this (compare-field this str strcmp))
               field-tests (mapv getter fields)]
           (emit/cond* emit/ValueP field-tests (fn [] emit/nil*)))))))
 
-(defn set-field [this field val]
+(defn set-field [t this field val]
   (fn []
-    (emit/set-field this (inc (:field-id field)) val)
+    (emit/set-field t this (inc (:field-id field)) val)
     emit/nil*))
 
 (defn field-setter [name type fields]
@@ -183,7 +187,7 @@
                                (fn []
                                  (emit/if*
                                    (fn [] (comparator field))
-                                   (set-field this field val)
+                                   (set-field type this field val)
                                    prev))
                                prev))
                            (fn [] emit/nil*)
@@ -197,11 +201,11 @@
       (let [ptr-type (emit/ptr-of instance-struct)
             mem      (emit/allocate (emit/sizeof instance-struct))
             instance (emit/bitcast mem ptr-type)]
-        (emit/set-field instance 0 type)
+        (emit/set-field instance-struct instance 0 type)
         (loop [n     0
                types field-types]
           (when-let [field-type (first types)]
-            (emit/set-field instance (inc n) (emit/arg fun n))
+            (emit/set-field instance-struct instance (inc n) (emit/arg fun n))
             (recur (inc n) (next types))))
         (emit/bitcast instance emit/ValueP)))))
 

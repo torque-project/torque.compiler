@@ -153,10 +153,9 @@
   {:value
    (cond
      (= (:local ast) :field)
-       (emit/get-field (emit/arg (:fun ctx) 0) (inc (:field-id ast)))
+       (emit/get-field (:frame ctx) (emit/arg (:fun ctx) 0) (inc (:field-id ast)))
      :else
        (-> ctx :env :locals (get (:name ast))))})
-
 
 (defmethod -compile-ast :var [ast ctx]
   (let [name (emit/mangle-var (:var ast))]
@@ -290,7 +289,7 @@
   (reduce
     (fn [ctx [sym id]]
       (assoc-in ctx [:env :locals sym]
-        (emit/get-field (emit/arg (:fun ctx) 0) (inc id))))
+        (emit/get-field (:frame ctx) (emit/arg (:fun ctx) 0) (inc id))))
     ctx
     (map vector (:closed-overs parent-ctx) (iterate inc 0))))
 
@@ -368,7 +367,7 @@
 (defn satisfies [protocol x]
   (let [protocol (emit/bitcast protocol emit/ProtoP)]
     (emit/cmp emit/ne
-      (gen/find-protocol (emit/get-field x 0) (emit/get-field protocol 1))
+      (gen/find-protocol (emit/get-field emit/Value x 0) (emit/get-field emit/Protocol protocol 1))
       emit/not-implemented)))
 
 (defmethod -compile-ast :dispatch [ast ctx]
@@ -377,7 +376,7 @@
         method     (:method ast)
         args       (compile-all (:args ast) ctx)
         self       (emit/bitcast (:value (first args)) emit/ValueP)
-        type       (emit/get-field self 0)
+        type       (emit/get-field emit/Value self 0)
         extension  (gen/find-protocol type (emit/int emit/int32 (:id protocol)))]
     {:value
       (gen/emit-protocol-call
@@ -450,15 +449,15 @@
 
 (defmethod -compile-ast :type-field [ast ctx]
   (let [val       (:value (-compile-ast (:target ast) ctx))
-        type      (emit/get-field val 0)
-        field-fun (emit/get-field type 3)
+        type      (emit/get-field emit/Value val 0)
+        field-fun (emit/get-field emit/ValueType type 3)
         s (emit/global ".field" (emit/string (name (:field ast))))]
     {:value (emit/call field-fun [val s])}))
 
 (defmethod -compile-ast :set! [ast ctx]
   (let [target (:value (-compile-ast (:target ast) ctx))
         val    (:value (-compile-ast (:val ast) ctx))
-        setter (emit/get-field (emit/value-type target) emit/type-set-field)
+        setter (emit/get-field emit/ValueType (emit/value-type target) emit/type-set-field)
         s      (emit/global ".field" (emit/string (name (:field ast))))]
     (emit/call setter [target s (emit/box val)])
     {:value emit/nil*}))
