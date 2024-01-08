@@ -31,15 +31,16 @@
     (print "Registering builtins...")
     (let [rt0 (rt/rt0)]
       (println "Adding runtime module")
-      (add-module (intptr @jit) (intptr rt0)))
+      (println rt0)
+      (add-module @jit rt0))
     (println "Done..."))
   @jit)
 
 (defn register-unit [name unit]
   (add-module (intptr (singleton)) (intptr unit)))
 
-(defn register-fun [name ast]
-  (add-ast (intptr (singleton)) name ast))
+(defn register-fun [name emitter]
+  (add-ast (intptr (singleton)) name (ffi/fnptr emitter :ptr [])))
 
 (defn ^:private -resolve
   [symbol resolve-fn]

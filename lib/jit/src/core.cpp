@@ -44,13 +44,13 @@ namespace llvm {
       mat_unit_t(ast_layer_t& layer, const std::string& name, emit_t emit);
 
       StringRef getName() const override {
-        return "TorqueASTMaterializationUnit";
+        return "TorqueMaterializationUnit";
       }
 
       void materialize(std::unique_ptr<MaterializationResponsibility> r) override;
 
       void discard(const JITDylib &jd, const SymbolStringPtr &sym) override {
-        llvm_unreachable("Kaleidoscope functions are not overridable");
+        llvm_unreachable("Functions are not overridable");
       }
     };
 
@@ -74,7 +74,10 @@ namespace llvm {
 
       void emit(std::unique_ptr<MaterializationResponsibility> mr,
                 mat_unit_t::emit_t emit) {
-        base_layer.emit(std::move(mr), std::move(*static_cast<ThreadSafeModule*>(emit())));
+        std::cout << "Callback" << std::endl;
+        auto mod = emit();
+        std::cout << "Done Callback" << std::endl;
+        base_layer.emit(std::move(mr), std::move(*static_cast<ThreadSafeModule*>(mod)));
       }
 
       MaterializationUnit::Interface interface(const std::string& name, mat_unit_t::emit_t emit) {
@@ -145,9 +148,7 @@ namespace llvm {
         if (!rt)
           rt = main_jd.getDefaultResourceTracker();
         
-        const auto impl = name + "_impl";
-
-        return ast_layer.add(rt, impl, std::move(emit));
+        return ast_layer.add(rt, name, std::move(emit));
       }
 
       Expected<JITEvaluatedSymbol> lookup(StringRef name) {
@@ -205,6 +206,9 @@ namespace llvm {
       static Expected<ThreadSafeModule>
       optimize_module(ThreadSafeModule TSM, const MaterializationResponsibility &R) {
         TSM.withModuleDo([](Module &M) {
+          std::cout << "Optimizing: " << M.getModuleIdentifier() << std::endl;
+          // M.dump();
+
           // Create a function pass manager.
           auto FPM = std::make_unique<legacy::FunctionPassManager>(&M);
 
@@ -219,8 +223,9 @@ namespace llvm {
           // the JIT.
           for (auto &F : M)
             FPM->run(F);
+
+          std::cout << "Done optimizing" << std::endl;
         });
-        std::cout << "Done optimizing" << std::endl;
         return std::move(TSM);
       }
     };
@@ -235,6 +240,7 @@ namespace llvm {
     void mat_unit_t::materialize(std::unique_ptr<MaterializationResponsibility> r) {
       std::cout << "Materializing function: " << name << std::endl; 
       layer.emit(std::move(r), std::move(emit));
+      std::cout << "Done materializing" << std::endl;
     }
   }
 }
@@ -292,6 +298,9 @@ extern "C" {
       std::cout 
         << "Error while adding function AST: " 
         << llvm::toString(std::move(error)) << std::endl;
+    }
+    else {
+      std::cout << "Added function ast: " << name << std::endl;
     }
   }
 

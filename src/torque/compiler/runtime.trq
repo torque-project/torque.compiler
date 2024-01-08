@@ -62,7 +62,7 @@
 
 (defn ^:private emit-integer-type []
   (gen/type builtin/integer-type-name
-    [{:type emit/int64 :name 'value :field-id 1}]
+    [{:type emit/int64 :name 'value :field-id 1 :invisible? true}]
     (fn [type]
       [])))
 
@@ -86,7 +86,8 @@
 
 (defn rt0 []
   (emit/with-unit (emit/unit "__torque_rt0")
-    (emit-binary-type)
-    ;; (emit-integer-type)
+    ;; (emit-binary-type)
+    (emit-integer-type)
     ;; (emit-array-type)
     ))
+

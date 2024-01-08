@@ -321,11 +321,13 @@
 (def Protocol  (define-struct "Protocol" [TypeP int32]))
 (def ProtoP    (ptr-of Protocol))
 
+(def field-getter (fun-type ValueP [ValueP int8-ptr]))
+
 (define-struct ValueType
   [int32
    dispatch-table
    int32
-   (ptr-of (fun-type ValueP [ValueP int8-ptr]))
+   (ptr-of field-getter)
    (ptr-of (fun-type ValueP [ValueP int8-ptr ValueP]))])
 
 (def type-num-exts   0)
@@ -584,7 +586,7 @@
         t      (fun-type ValueP types)
         ctor   (declare-fun! (str name "_new") (intptr ValueP) types)]
      (-> (intptr *builder*)
-         (-call (intptr ctor) t (util/ptrs-to-mem values) num "")
+         (-call t (intptr ctor) (util/ptrs-to-mem values) num "")
          (value))))
 
 (defn ^:private force-box [x]

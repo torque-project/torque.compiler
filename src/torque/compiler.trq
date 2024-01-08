@@ -12,7 +12,8 @@
     [torque.compiler.generators :as gen]
     [torque.compiler.jit2 :as jit]
     [torque.compiler.runtime :as rt]
-    [torque.io.fs :as fs]))
+    [torque.io.fs :as fs]
+    [torque.lang.debug :as d]))
 
 (def ^:dynamic *compiler-env*
   "The global environment of the compiler. This holds all name
@@ -232,8 +233,9 @@
 
 (defmethod -compile-ast :catch [ast ctx]
   (let [binding (get-in ast [:exception :form])
+        t       (emit/fun-type emit/ValueP [])
         get-ex  (emit/declare-fun! "___trq_get_exception" emit/ValueP [])
-        ctx     (assoc-in ctx [:env :locals binding] (emit/call get-ex []))]
+        ctx     (assoc-in ctx [:env :locals binding] (emit/call get-ex t []))]
     (-compile-ast (:expr ast) ctx)))
 
 (defmethod -compile-ast :try-catch [ast ctx]
@@ -243,11 +245,12 @@
      (try-catch-block :catch? (:catch ast) ctx))})
 
 (defmethod -compile-ast :throw [ast ctx]
-  (let [thrower  (emit/declare-fun! "___trq_throw" emit/void [emit/void-ptr])
+  (let [t        (emit/fun-type emit/void [emit/void-ptr])
+        thrower  (emit/declare-fun! "___trq_throw" emit/void [emit/void-ptr])
         ex       (:value (-compile-ast (:throwable ast) ctx))]
     (if (:try? ctx)
       (emit/invoke thrower [ex] (:try-catch ctx))
-      (emit/call thrower [ex]))
+      (emit/call thrower t [ex]))
     (emit/unreachable))
   nil)
 
@@ -349,14 +352,16 @@
     ;; register lazy implementation of fun
     (jit/register-fun name 
       (fn []
-        (emit/define-fun! extern-name emit/ValueP (arg-types ast ctx)
-          (fn [fun]
-            (->> (assoc (fun-context fun) :tag (:tag ctx))
-                 (emit-fn-local ast)
-                 (emit-closed-overs ctx)
-                 (emit-params ast)
-                 (emit-method-body ast)
-                 :value)))))
+        (println "materializing")
+        (emit/with-unit (emit/unit name)
+          (emit/define-fun! extern-name emit/ValueP (arg-types ast ctx)
+            (fn [fun]
+              (->> (assoc (fun-context fun) :tag (:tag ctx))
+                   (emit-fn-local ast)
+                   (emit-closed-overs ctx)
+                   (emit-params ast)
+                   (emit-method-body ast)
+                   :value))))))
     (let [ext (emit/declare-fun! extern-name emit/ValueP (arg-types ast ctx))]
       ;; return stub function with callthrough to lazily compiled
       ;; implementation
@@ -367,7 +372,9 @@
 (defn satisfies [protocol x]
   (let [protocol (emit/bitcast protocol emit/ProtoP)]
     (emit/cmp emit/ne
-      (gen/find-protocol (emit/get-field emit/Value x 0) (emit/get-field emit/Protocol protocol 1))
+      (gen/find-protocol 
+        (emit/get-field emit/Value x 0) 
+        (emit/get-field emit/Protocol protocol 1))
       emit/not-implemented)))
 
 (defmethod -compile-ast :dispatch [ast ctx]
@@ -452,7 +459,7 @@
         type      (emit/get-field emit/Value val 0)
         field-fun (emit/get-field emit/ValueType type 3)
         s (emit/global ".field" (emit/string (name (:field ast))))]
-    {:value (emit/call field-fun [val s])}))
+    {:value (emit/call field-fun emit/field-getter [val s])}))
 
 (defmethod -compile-ast :set! [ast ctx]
   (let [target (:value (-compile-ast (:target ast) ctx))
@@ -552,7 +559,7 @@
                      (get marshalled-types ret-type)
                      (map (fn [x] (get marshalled-types x)) arg-types))
         callable   (emit/bitcast unboxed (emit/ptr-of signature))
-        ret        (emit/call callable marshalled)]
+        ret        (emit/call callable signature marshalled)]
     {:value (unmarshal ret ret-type)}))
 
 (defn ^:private emit-instrinsic*
@@ -643,6 +650,7 @@
      ~@body))
 
 (defn eval-ast [ast]
+  (println "EVAL")
   (let [jit  (jit/singleton)
         name (name (gensym "eval"))
         unit (emit/unit name)]
@@ -658,8 +666,8 @@
     (jit/register-unit name unit)
     (when-let [addr (jit/resolve-address name)]
       (println "INVOKE")
-      (invoke* addr :native []))
-    (throw "EXIT")))
+      (d/spy (invoke* addr :native []))
+      (println "DONE"))))
 
 (defn eval [form]
   (binding [trq/*resolver* (r/project-resolver (fs/cwd))

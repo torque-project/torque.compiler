@@ -163,7 +163,7 @@
         (let [this        (emit/arg fun 0)
               str         (emit/arg fun 1)
               getter      (get-field type this (compare-field this str strcmp))
-              field-tests (mapv getter fields)]
+              field-tests (->> fields (remove :invisible?) (mapv getter))]
           (emit/cond* emit/ValueP field-tests (fn [] emit/nil*)))))))
 
 (defn set-field [t this field val]
@@ -181,17 +181,18 @@
               str        (emit/arg fun 1)
               val        (emit/arg fun 2)
               comparator (compare-field this str strcmp)
-              conditions (reduce
-                           (fn [prev field]
-                             (if (emit/value? (:type field emit/ValueP))
-                               (fn []
-                                 (emit/if*
-                                   (fn [] (comparator field))
-                                   (set-field type this field val)
-                                   prev))
-                               prev))
-                           (fn [] emit/nil*)
-                           fields)]
+              conditions (->> fields
+                              (remove :invisible?)
+                              (reduce
+                                (fn [prev field]
+                                  (if (emit/value? (:type field emit/ValueP))
+                                    (fn []
+                                      (emit/if*
+                                        (fn [] (comparator field))
+                                        (set-field type this field val)
+                                        prev))
+                                    prev))
+                                (fn [] emit/nil*)))]
           (conditions))))))
 
 (defn ctor [name type instance-struct field-types]
