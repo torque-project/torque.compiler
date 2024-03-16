@@ -18,6 +18,7 @@
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/GVN.h"
 
+#include "llvm-c/Core.h"
 #include "llvm-c/Orc.h"
 #include "llvm-c/OrcEE.h"
 
@@ -28,6 +29,9 @@ extern "C" {
   extern void* __trq_get_exception;
   extern void* __trq_personality_v0;
   extern void* __trq_throw;
+
+  extern void* torque_lang_Integer;
+  extern void* (*torque_lang_Integer_new(int64_t));
 }
 
 namespace llvm { 
@@ -35,7 +39,7 @@ namespace llvm {
     struct ast_layer_t;
 
     struct mat_unit_t : MaterializationUnit {
-      typedef void* (*emit_t)();
+      typedef LLVMModuleRef (*emit_t)();
 
       std::string name;
       emit_t emit;
@@ -72,19 +76,25 @@ namespace llvm {
           rt);
       }
 
-      void emit(std::unique_ptr<MaterializationResponsibility> mr,
-                mat_unit_t::emit_t emit) {
-        std::cout << "Callback" << std::endl;
-        auto mod = emit();
-        std::cout << "Done Callback" << std::endl;
-        base_layer.emit(std::move(mr), std::move(*static_cast<ThreadSafeModule*>(mod)));
+      void emit(
+        std::unique_ptr<MaterializationResponsibility> mr,
+        mat_unit_t::emit_t emit)
+      {
+        LLVMModuleRef module = emit();
+
+        std::unique_ptr<Module> m(unwrap(module));
+
+        ThreadSafeContext ctx(std::make_unique<LLVMContext>());
+        ThreadSafeModule tsm(std::move(m), ctx);
+
+        base_layer.emit(std::move(mr), std::move(tsm));
       }
 
       MaterializationUnit::Interface interface(const std::string& name, mat_unit_t::emit_t emit) {
         MangleAndInterner mangle(base_layer.getExecutionSession(), dl);
         SymbolFlagsMap symbols;
         symbols[mangle(name)] = JITSymbolFlags(JITSymbolFlags::Exported | JITSymbolFlags::Callable);
-        
+
         return MaterializationUnit::Interface(std::move(symbols), nullptr);
       }
     };
@@ -127,7 +137,9 @@ namespace llvm {
             { mangle("malloc"), JITEvaluatedSymbol::fromPointer(&malloc)},
             { mangle("__trq_throw"), JITEvaluatedSymbol::fromPointer(__trq_throw)},
             { mangle("__trq_get_exception"), JITEvaluatedSymbol::fromPointer(__trq_get_exception)},
-            { mangle("__trq_personality_v0"), JITEvaluatedSymbol::fromPointer(__trq_personality_v0)}
+            { mangle("__trq_personality_v0"), JITEvaluatedSymbol::fromPointer(__trq_personality_v0)},
+            { mangle("torque_lang_Integer"), JITEvaluatedSymbol::fromPointer(torque_lang_Integer)},
+            { mangle("torque_lang_Integer_new"), JITEvaluatedSymbol::fromPointer(torque_lang_Integer_new)},
           }))) {
           throw std::runtime_error("Error while starting JIT. Can't define symbols");
         }
@@ -147,7 +159,7 @@ namespace llvm {
       Error add(const std::string& name, mat_unit_t::emit_t emit, ResourceTrackerSP rt = nullptr) {
         if (!rt)
           rt = main_jd.getDefaultResourceTracker();
-        
+
         return ast_layer.add(rt, name, std::move(emit));
       }
 
@@ -206,9 +218,6 @@ namespace llvm {
       static Expected<ThreadSafeModule>
       optimize_module(ThreadSafeModule TSM, const MaterializationResponsibility &R) {
         TSM.withModuleDo([](Module &M) {
-          std::cout << "Optimizing: " << M.getModuleIdentifier() << std::endl;
-          // M.dump();
-
           // Create a function pass manager.
           auto FPM = std::make_unique<legacy::FunctionPassManager>(&M);
 
@@ -221,11 +230,11 @@ namespace llvm {
 
           // Run the optimizations over all functions in the module being added to
           // the JIT.
-          for (auto &F : M)
+          for (auto &F : M) {
             FPM->run(F);
-
-          std::cout << "Done optimizing" << std::endl;
+          }
         });
+
         return std::move(TSM);
       }
     };
@@ -238,9 +247,7 @@ namespace llvm {
     {}
 
     void mat_unit_t::materialize(std::unique_ptr<MaterializationResponsibility> r) {
-      std::cout << "Materializing function: " << name << std::endl; 
       layer.emit(std::move(r), std::move(emit));
-      std::cout << "Done materializing" << std::endl;
     }
   }
 }
@@ -252,21 +259,15 @@ DEFINE_SIMPLE_CONVERSION_FUNCTIONS(llvm::orc::ThreadSafeModule, LLVMOrcThreadSaf
 
 extern "C" {
   void* init() {
-    std::cout << "Init JIT" << std::endl;
-
     InitializeNativeTargetAsmPrinter();
     InitializeNativeTargetAsmParser();
     InitializeNativeTarget();
     // InitializeNativeTargetTargetMC();
 
-    std::cout << "New JIT" << std::endl;
-
     auto jit = llvm::orc::jit_t::make();
     if (!jit) {
       std::cout << "Error: " << toString(std::move(jit.takeError())) << std::endl;
     }
-
-    std::cout << "Retuning JIT" << std::endl;
 
     return jit.get();
   }
@@ -293,14 +294,11 @@ extern "C" {
     // std::cout << s << std::endl;
   }
 
-  void add_ast(void* jit, const char* name, llvm::orc::mat_unit_t::emit_t& emit) {
+  void add_ast(void* jit, const char* name, llvm::orc::mat_unit_t::emit_t emit) {
     if (auto error = static_cast<llvm::orc::jit_t*>(jit)->add(name, emit)) {
       std::cout 
         << "Error while adding function AST: " 
         << llvm::toString(std::move(error)) << std::endl;
-    }
-    else {
-      std::cout << "Added function ast: " << name << std::endl;
     }
   }
 

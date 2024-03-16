@@ -1,4 +1,3 @@
-;; vim: set ft=clojure:
 ;; -*- mode: clojure;-*-
 
 (ns torque.compiler.runtime
@@ -87,7 +86,6 @@
 (defn rt0 []
   (emit/with-unit (emit/unit "__torque_rt0")
     ;; (emit-binary-type)
-    (emit-integer-type)
+    ;; (emit-integer-type)
     ;; (emit-array-type)
     ))
-

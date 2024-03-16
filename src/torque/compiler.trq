@@ -160,7 +160,7 @@
 
 (defmethod -compile-ast :var [ast ctx]
   (let [name (emit/mangle-var (:var ast))]
-    {:value (emit/load (emit/extern name emit/ValueP) name)}))
+    {:value (emit/load emit/Value (emit/extern name emit/ValueP) name)}))
 
 (defmethod -compile-ast :do [ast ctx]
   (loop [stmts (seq (:statements ast))]
@@ -191,7 +191,7 @@
 (defn ^:private load-recur-bindings [bindings mutables]
   (->> (map (fn [binding mutable]
               (let [n (:name binding)]
-                [n (emit/load mutable (name n))]))
+                [n (emit/load (:type binding emit/void-ptr) mutable (name n))]))
             bindings
             mutables)
        (into {})))
@@ -352,7 +352,6 @@
     ;; register lazy implementation of fun
     (jit/register-fun name 
       (fn []
-        (println "materializing")
         (emit/with-unit (emit/unit name)
           (emit/define-fun! extern-name emit/ValueP (arg-types ast ctx)
             (fn [fun]
@@ -650,7 +649,6 @@
      ~@body))
 
 (defn eval-ast [ast]
-  (println "EVAL")
   (let [jit  (jit/singleton)
         name (name (gensym "eval"))
         unit (emit/unit name)]
@@ -662,12 +660,9 @@
             (->> (assoc (fun-context f) :tag tag)
                  (compile-ast ast)
                  (:value))))))
-    (println unit)
     (jit/register-unit name unit)
     (when-let [addr (jit/resolve-address name)]
-      (println "INVOKE")
-      (d/spy (invoke* addr :native []))
-      (println "DONE"))))
+      (invoke* addr :native []))))
 
 (defn eval [form]
   (binding [trq/*resolver* (r/project-resolver (fs/cwd))

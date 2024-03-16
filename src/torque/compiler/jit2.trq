@@ -26,14 +26,9 @@
 
 (defn singleton []
   (when (nil? @jit)
-    (println "Booting JIT")
     (reset! jit (new JIT (make-jit)))
-    (print "Registering builtins...")
     (let [rt0 (rt/rt0)]
-      (println "Adding runtime module")
-      (println rt0)
-      (add-module @jit rt0))
-    (println "Done..."))
+      (add-module @jit rt0)))
   @jit)
 
 (defn register-unit [name unit]

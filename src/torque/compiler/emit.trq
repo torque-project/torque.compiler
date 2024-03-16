@@ -401,13 +401,13 @@
    (load field-type (opaque-struct-gep *builder* t ptr idx "") "")))
 
 (defn set-field [t inst n val]
-  (store (opaque-struct-gep (intptr *builder*) (intptr t) (intptr inst) n "") val))
+  (store (opaque-struct-gep *builder* t inst n "") val))
 
 (defn value? [val]
   (== (intptr (type-of val)) (intptr ValueP)))
 
 (defn value-type [val]
-  (get-field Value val 0))
+  (get-field Value val TypeP 0))
 
 (defn true* []
   (load ValueP (extern "torque_lang_True" ValueP) ""))
@@ -443,6 +443,9 @@
 
 (defn mangle-method [type protocol meth arity]
   (str type "_" protocol "_" meth "_" arity))
+
+(defn mangle-export [s]
+  (str "_" s))
 
 (defn find-fun [name]
   (get-fun (intptr *unit*) name))
@@ -506,8 +509,8 @@
 (defn resume [ex]
   (-resume (intptr *builder*) (intptr ex)))
 
-(defn deref [t val indices]
-  (load t (-igep (intptr *builder*)
+(defn deref [t val result-type indices]
+  (load result-type (-igep (intptr *builder*)
                  (intptr t)
                  (intptr val)
                  (util/ptrs-to-mem indices)
@@ -545,9 +548,8 @@
 (defn unbox [x]
   (if (= (-> x type-of intptr kind) int-kind)
     x
-    (let [box (bitcast x box-ptr)
-          ptr (opaque-struct-gep (intptr *builder*) (intptr int64) (intptr box) 2 "")]
-      (value (-opaque-load (intptr *builder*) (intptr int64) ptr "")))))
+    (let [ptr (opaque-struct-gep (intptr *builder*) box-type x 2 "")]
+      (value (-opaque-load *builder* int64 ptr "")))))
 
 (defn sizeof [t]
   (value (-sizeof (intptr t))))
@@ -568,15 +570,21 @@
   (alloca (intptr *builder*) (intptr type) (intptr size)))
 
 (defn memcpy [dst src len]
-  (-> (declare-fun! "_memcpy" int8-ptr [int8-ptr int8-ptr int64])
+  (-> "memcpy"
+      (mangle-export)
+      (declare-fun! int8-ptr [int8-ptr int8-ptr int64])
       (call memcpy-type [dst src len])))
 
 (defn memcmp [dst src len]
-  (-> (declare-fun! "_memcmp" int64 [int8-ptr int8-ptr int64])
+  (-> "memcpy"
+      (mangle-export)
+      (declare-fun! int64 [int8-ptr int8-ptr int64])
       (call memcmp-type [dst src len])))
 
 (defn strlen [s]
-  (-> (declare-fun! "_strlen" int64 [int8-ptr])
+  (-> "strlen"
+      (mangle-export)
+      (declare-fun! int64 [int8-ptr])
       (call strlen-type [s])))
 
 (defn new* [name args]
@@ -590,8 +598,10 @@
          (value))))
 
 (defn ^:private force-box [x]
-  (-> (declare-fun! "torque_lang_Integer_new" ValueP [int64])
-      (call 
+  (-> "torque_lang_Integer_new"
+      (mangle-export)
+      (declare-fun! ValueP [int64])
+      (call
         (fun-type ValueP [int64]) 
         [(-ptrtoint (intptr *builder*) (intptr x) (intptr int64) "")])))
 
